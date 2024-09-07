@@ -372,7 +372,7 @@ int main (void)
 
 	DEBUG_LedSet(RESET,1)
 	#ifdef UPPER_LED
-		digitalWrite(UPPER_LED,RESET);
+		//digitalWrite(UPPER_LED,RESET);
 	#endif
 
 	while(1)

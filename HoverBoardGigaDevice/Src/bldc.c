@@ -212,7 +212,7 @@ void CalculateBLDC(void)
 		#ifdef LED_ORANGE
 			digitalWrite(LED_ORANGE,hall_b);
 		#elif defined(UPPER_LED)
-			digitalWrite(UPPER_LED,hall_b);
+			//digitalWrite(UPPER_LED,hall_b);
 		#elif defined(LOWER_LED)
 			digitalWrite(LOWER_LED,hall_b);
 		#else

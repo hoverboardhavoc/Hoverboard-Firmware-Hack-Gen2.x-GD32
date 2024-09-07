@@ -20,7 +20,7 @@
 
 	// LAYOUT_2_X is used in defines.h
 	#ifdef GD32F130		// TARGET = 1
-		#define LAYOUT 1
+		#define LAYOUT 20
 		#define LAYOUT_SUB 1	// Layout 2.1.7 exisits as 2.1.7.0 and 2.1.7.1
 	#elif GD32F103		// TARGET = 2
 		#define LAYOUT 1
@@ -34,13 +34,14 @@
 	//#define SLAVE			// uncomment for SLAVE firmware. Choose USART0_MASTERSLAVE or USART1_MASTERSLAVE in your defines_2-?.h file
 	//#define SINGLE			// uncomment if firmware is for single board and no master-slave dual board setup
 
-	#define BAT_CELLS         	10        // battery number of cells. Normal Hoverboard battery: 10s
+	#define BAT_CELLS         	7        // battery number of cells. Normal Hoverboard battery: 10s
 
 	#if defined(MASTER) || defined(SINGLE)
 		#define MASTER_OR_SINGLE
 		
-		//#define REMOTE_DUMMY
-		#define REMOTE_UART
+
+		#define REMOTE_DUMMY
+		//#define REMOTE_UART
 		//#define REMOTE_UARTBUS	// ESP32 as master and multiple boards as multiple slaves ESP.tx-Hovers.rx and ESP.rx-Hovers.tx
 		//#define REMOTE_CRSF		// https://github.com/RoboDurden/Hoverboard-Firmware-Hack-Gen2.x/issues/26
 		

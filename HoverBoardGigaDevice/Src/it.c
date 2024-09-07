@@ -57,6 +57,11 @@ extern FlagStatus beepsBackwards;
 void SysTick_Handler(void)
 {
   msTicks++;
+  if (msTicks % 5000 < 50) {
+	digitalWrite(UPPER_LED,SET);
+  } else {
+	digitalWrite(UPPER_LED,RESET);
+  }
 }
 
 //----------------------------------------------------------------------------
