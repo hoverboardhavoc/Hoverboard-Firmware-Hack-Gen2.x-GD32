@@ -36,4 +36,6 @@
 	#define USART1_MASTERSLAVE		// uncomment if this usart is used for master-slave communication
 #endif
 
+#define USART1_REMOTE
+
 #endif
