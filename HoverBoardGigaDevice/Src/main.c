@@ -434,6 +434,7 @@ int main (void)
 
 			#endif
 
+			BuzzerSet(1,1)
 				
 			// Show green battery symbol when battery level BAT_LOW_LVL1 is reached
 			if (batteryVoltage > BAT_LOW_LVL1)
@@ -445,13 +446,14 @@ int main (void)
 				BeepsBackwards(beepsBackwards);
 			}
 			
+	
 			// Make silent sound and show orange battery symbol when battery level BAT_LOW_LVL2 is reached
 			else if (batteryVoltage > BAT_LOW_LVL2 && batteryVoltage < BAT_LOW_LVL1)
 			{
 				// Show orange battery light
 					ShowBatteryState(1);
 				
-				BuzzerSet(5,8)	// (iFrequency, iPattern)
+				//BuzzerSet(5,8)	// (iFrequency, iPattern)
 			}
 			// Make even more sound and show red battery symbol when battery level BAT_LOW_DEAD is reached
 			else if  (batteryVoltage > BAT_LOW_DEAD && batteryVoltage < BAT_LOW_LVL2)
@@ -459,7 +461,7 @@ int main (void)
 				// Show red battery light
 				ShowBatteryState(0);
 
-				BuzzerSet(5,1)	// (iFrequency, iPattern)
+				//BuzzerSet(5,1)	// (iFrequency, iPattern)
 			}
 			// Shut device off, when battery is dead
 			else if (batteryVoltage < BAT_LOW_DEAD)
