@@ -36,4 +36,6 @@
 #define USART1_TX		PA2
 #define USART1_RX		PA3
 
+#define ADC_BATTERY_VOLT 1
+
 #endif
