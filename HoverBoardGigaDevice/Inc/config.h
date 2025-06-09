@@ -20,7 +20,7 @@
 
 	// LAYOUT_2_X is used in defines.h
 	#ifdef GD32F130		// TARGET = 1
-		#define LAYOUT 1
+		#define LAYOUT 20
 		#define LAYOUT_SUB 1	// Layout 2.1.7 exisits as 2.1.7.0 and 2.1.7.1
 	#elif GD32F103		// TARGET = 2
 		#define LAYOUT 1
@@ -30,12 +30,14 @@
 		#define LAYOUT 1
 	#endif
 
-	#define MASTER		// uncomment for MASTER firmware. Choose USART0_MASTERSLAVE or USART1_MASTERSLAVE in your defines_2-?.h file
+	//#define MASTER		// uncomment for MASTER firmware. Choose USART0_MASTERSLAVE or USART1_MASTERSLAVE in your defines_2-?.h file
 	//#define SLAVE			// uncomment for SLAVE firmware. Choose USART0_MASTERSLAVE or USART1_MASTERSLAVE in your defines_2-?.h file
-	//#define SINGLE			// uncomment if firmware is for single board and no master-slave dual board setup
+	#define SINGLE			// uncomment if firmware is for single board and no master-slave dual board setup
 
-	#define BAT_CELLS         	10        // battery number of cells. Normal Hoverboard battery: 10s
+	#define BAT_CELLS         	8     // battery number of cells. Normal Hoverboard battery: 10s
 
+	#define USART1_REMOTE
+	
 	#if defined(MASTER) || defined(SINGLE)
 		#define MASTER_OR_SINGLE
 		
@@ -59,7 +61,7 @@
 		#define SPEED_COEFFICIENT   -1
 		#define STEER_COEFFICIENT   1
 		
-		#define CHECK_BUTTON		// disable = add '//' if you use a slave board as master
+		//#define CHECK_BUTTON		// disable = add '//' if you use a slave board as master
 	#endif
 #endif
 
@@ -83,9 +85,9 @@
 	// ################################################################################
 
 
-	#define CELL_LOW_LVL1     3.5       // Gently beeps, show green battery symbol above this Level.
-	#define CELL_LOW_LVL2     3.3       // Battery almost empty, show orange battery symbol above this Level. Charge now! 
-	#define CELL_LOW_DEAD     3.1       // Undervoltage lockout, show red battery symbol above this Level.
+	#define CELL_LOW_LVL1     3.0       // Gently beeps, show green battery symbol above this Level.
+	#define CELL_LOW_LVL2     2.8       // Battery almost empty, show orange battery symbol above this Level. Charge now! 
+	#define CELL_LOW_DEAD     2.5       // Undervoltage lockout, show red battery symbol above this Level.
 
 	#define BAT_LOW_LVL1     BAT_CELLS * CELL_LOW_LVL1
 	#define BAT_LOW_LVL2     BAT_CELLS * CELL_LOW_LVL2
@@ -121,7 +123,7 @@
 
 #if COMMUTATION_MODE == SVM_COMMUTATION
 	#ifndef PHASE_ADVANCE_AT_MAX_PWM_DEGREES // Also set from tests
-		#define PHASE_ADVANCE_AT_MAX_PWM_DEGREES 6
+		#define PHASE_ADVANCE_AT_MAX_PWM_DEGREES 8
 	#endif
 #endif 
 

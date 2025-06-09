@@ -37,4 +37,6 @@
 	#define USART1_MASTERSLAVE		// uncomment if this usart is used for master-slave communication
 #endif
 
+#define ADC_BATTERY_VOLT 1
+
 #endif

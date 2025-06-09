@@ -128,8 +128,12 @@ void CalculateBLDC(void)
 	
 	// Calculate battery voltage every 100 cycles
 	#ifdef VBATT
-		if (buzzerTimer % 100 == 0)
-			batteryVoltage = batteryVoltage * 0.999 + ((float)adc_buffer.v_batt * ADC_BATTERY_VOLT) * 0.001;
+		if (buzzerTimer % 100 == 0) {
+			float bat = (float)adc_buffer.v_batt * 0.025422 - 0.14372;
+			batteryVoltage = batteryVoltage * 0.999 + bat * 0.001;
+		
+		}
+			//batteryVoltage = (float)adc_buffer.v_batt;
 	#endif
 	
   buzzerTimer++;	// also used to calculate battery voltage :-/

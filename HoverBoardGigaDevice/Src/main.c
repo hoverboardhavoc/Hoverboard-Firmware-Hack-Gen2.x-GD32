@@ -262,7 +262,6 @@ void BeepsBackwards(FlagStatus beepsBackwards);
 
 #endif
 
-
 	FlagStatus enable = RESET;
 		int16_t pwmSlave = 0;
 
@@ -442,7 +441,7 @@ int main (void)
 				ShowBatteryState(2);
 				
 				// Beeps backwards
-				BeepsBackwards(beepsBackwards);
+				//BeepsBackwards(beepsBackwards);
 			}
 			
 			// Make silent sound and show orange battery symbol when battery level BAT_LOW_LVL2 is reached
