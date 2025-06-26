@@ -14,7 +14,7 @@
 #define BUZZER PB9
 
 #define VBATT PA4
-#define CURRENT_DC PA0 
+//#define CURRENT_DC PA0 
 
 #define SELF_HOLD	PB12
 #define BUTTON PA12
