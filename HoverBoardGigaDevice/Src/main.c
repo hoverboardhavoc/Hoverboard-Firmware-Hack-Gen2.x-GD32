@@ -6,7 +6,8 @@
 #include "../Inc/it.h"
 #include "../Inc/bldc.h"
 #include "../Inc/commsMasterSlave.h"
-
+#include "../Inc/util.h"
+#include "../Inc/systick.h"
 //#include "../Inc/commsSteering.h"
 
 #include "../Inc/commsBluetooth.h"
@@ -28,6 +29,13 @@ int32_t speed = 0; 												// global variable for speed.    -1000 to 1000
 int32_t speedShutoff = 0;
 int16_t speedLimit = 1000;
 
+#ifdef SELF_BALANCING_ENABLE
+	volatile uint8_t*       i2c_txbuffer;
+	volatile uint8_t*       i2c_rxbuffer;
+	volatile uint16_t       I2C_nBytes;
+	volatile ErrStatus      status;
+	ErrStatus state = ERROR;
+#endif
 
 
 #define STATE_LedGreen 1	
@@ -107,7 +115,7 @@ int main (void)
 	
 	//SystemClock_Config();
   SystemCoreClockUpdate();
-  SysTick_Config(SystemCoreClock / 1000);	//  Configure SysTick to generate an interrupt every millisecond
+  systick_config();       
 	
 iBug = 2;
 	if (	Watchdog_init() == ERROR)	// Init watchdog
@@ -144,6 +152,11 @@ iBug = 6;
 			USART2_Init(USART2_BAUD);
 	#endif
 	
+#ifdef SELF_BALANCING_ENABLE
+	i2c_config();
+	i2c_nvic_config();
+	input_init();   
+#endif 
 	// Init ADC
 	ADC_init();
 iBug = 7;	
@@ -224,6 +237,10 @@ iBug = 9;
 		steerCounter++;		// something like DELAY_IN_MAIN_LOOP = 5 ms
 		DEBUG_LedSet(	(steerCounter%20) < 10	,0)
 		
+		#ifdef SELF_BALANCING_ENABLE
+			handle_mpu6050();
+		#endif
+
 		
 		#ifdef MOSFET_OUT
 			digitalWrite(MOSFET_OUT,	(steerCounter%200) < 100	);	// onboard led blinking :-)

@@ -111,4 +111,31 @@
 
 #define TIMEOUT_MS          2000      // Time in milliseconds without steering commands before pwm emergency off
 
+#define SELF_BALANCING_ENABLE
+
+#ifdef SELF_BALANCING_ENABLE
+	#define MPU6050                               // [-] Define IMU sensor type
+	#define MPU_GYRO_FSR              2000        // [deg/s] Set Gyroscope Full Scale Range: 250 deg/s, 500 deg/s, 1000 deg/s, 2000 deg/s. !! DMP sensor fusion works only with 2000 deg/s !!
+	#define MPU_ACCEL_FSR             2           // [g] Set Acceleromenter Full Scale Range: 2g, 4g, 8g, 16g. !! DMP sensor fusion works only with 2g !!
+	#define MPU_I2C_SPEED             400000      // [bit/s] Define I2C speed for communicating with the MPU6050
+	#define DELAY_IN_MAIN_LOOP        1           // [ms] Delay in the main loop
+
+	/* ==================================== SETTINGS MPU-6050 ==================================== */
+	#define MPU_SENSOR_ENABLE                     // [-] Enable flag for MPU-6050 sensor. Comment-out this flag to Disable the MPU sensor and reduce code size.
+	//#define MPU_DMP_ENABLE                        // [-] Enable flag for MPU-6050 DMP (Digital Motion Processing) functionality.
+	#define MPU_DEFAULT_HZ            20          // [Hz] Default MPU frequecy: must be between 1Hz and 200Hz.
+	#define TEMP_READ_MS              500         // [ms] Temperature read time interval
+	#define PEDO_READ_MS              1000        // [ms] Pedometer read time interval
+
+	// DMP Tap Detection Settings
+	#define DMP_TAP_AXES              TAP_XYZ     // [-] Set which axes will register a tap: TAP_XYZ, TAP_X, TAP_Y, TAP_Z
+	#define DMP_TAP_THRESH            250         // [mg/ms] Set tap threshold for the selected axis.
+	#define DMP_TAP_COUNT             1           // [-] Set minimum number of taps needed for an interrupt. Minimum consecutive taps: 1 to 4
+	#define DMP_TAP_TIME              100         // [ms] Set time length between valid taps.
+	#define DMP_TAP_TIME_MULTI        500         // [ms] Set max time between taps to register as a multi-tap.
+	#define DMP_SHAKE_REJECT_THRESH   200         // [deg/s] Set shake rejection threshold in degree per second (dps). If the DMP detects a gyro sample larger than the thresh, taps are rejected.
+	#define DMP_SHAKE_REJECT_TIME     40          // [ms] Set shake rejection time. Sets the length of time that the gyro must be outside of the DMP_SHAKE_REJECT_THRESH before taps are rejected. A mandatory 60 ms is added to this parameter.
+	#define DMP_SHAKE_REJECT_TIMEOUT  10          // [ms] Set shake rejection timeout. Sets the length of time after a shake rejection that the gyro must stay inside of the threshold before taps can be detected again. A mandatory 60 ms is added to this parameter.
+#endif
+
 #endif		// CONFIG_H

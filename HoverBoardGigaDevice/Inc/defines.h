@@ -194,6 +194,69 @@
   #define BUZZER_MelodyUp()
 #endif
 
+#ifdef SELF_BALANCING_ENABLE
+	#define i2c_write                   i2c_writeBytes
+	#define i2c_read                    i2c_readBytes 
+	#define delay_ms                    delay_1ms
+    #define get_ms                      get_tick_count_ms
+    typedef enum {READ = 0, WRITE = !READ} i2c_cmd;
+	#define MPU_I2C                     I2C0
+	#define MPU_RCU_I2C                 RCU_I2C0
+	#define MPU_SCL_GPIO_Port           GPIOB
+	#define MPU_SCL_PIN                 GPIO_PIN_6
+	#define MPU_SDA_GPIO_Port           GPIOB
+	#define MPU_SDA_PIN                 GPIO_PIN_7
+	#define I2C_OWN_ADDRESS7            0x24
+
+	/* =========================== Defines MPU-6050 =========================== */
+	#define RAD2DEG                     57.295779513082323      // RAD2DEG = 180/pi. Example: angle[deg] = angle[rad] * RAD2DEG
+	#define q30                         1073741824              // 1073741824 = 2^30
+	#define ACCEL_ON                    (0x01)
+	#define GYRO_ON                     (0x02)
+	#define COMPASS_ON                  (0x04)
+
+	#define PRINT_ACCEL                 (0x01)
+	#define PRINT_GYRO                  (0x02)
+	#define PRINT_QUAT                  (0x04)
+	#define PRINT_EULER                 (0x08)
+	#define PRINT_TEMP                  (0x10)
+	#define PRINT_PEDO                  (0x20)
+
+	typedef struct{
+		int16_t     x;
+		int16_t     y;
+		int16_t     z; 
+	} Gyro;
+
+	typedef struct{
+		int16_t     x;
+		int16_t     y;
+		int16_t     z; 
+	} Accel;
+
+	typedef struct{
+		int32_t     w;
+		int32_t     x;
+		int32_t     y;
+		int32_t     z; 
+	} Quaternion;
+
+	typedef struct{
+		int16_t     roll;
+		int16_t     pitch;
+		int16_t     yaw;
+	} Euler;
+
+	typedef struct {
+		Gyro        gyro;
+		Accel       accel;
+		Quaternion  quat;
+		Euler       euler;
+		int16_t     temp;
+	} MPU_Data;
+
+#endif
+
 
 // Useful math function defines
 #define ABS(a) (((a) < 0.0) ? -(a) : (a))

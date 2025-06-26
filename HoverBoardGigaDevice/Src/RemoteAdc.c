@@ -6,7 +6,7 @@
 
 extern int32_t steer;
 extern int32_t speed;
-extern uint32_t msTicks;
+extern volatile unsigned long msTicks;
 extern adc_buf_t adc_buffer;
 #ifdef BUZZER
 	extern uint8_t buzzerFreq;    						// global variable for the buzzer pitch. can be 1, 2, 3, 4, 5, 6, 7...

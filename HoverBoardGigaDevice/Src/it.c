@@ -37,6 +37,7 @@
 //#include "../Inc/commsSteering.h"
 
 #include "../Inc/commsBluetooth.h"
+#include "../Inc/systick.h"
 
 uint32_t msTicks;
 uint32_t timeoutCounter_ms = 0;
@@ -56,7 +57,8 @@ extern FlagStatus beepsBackwards;
 //----------------------------------------------------------------------------
 void SysTick_Handler(void)
 {
-  msTicks++;
+    tick_count_increment();
+    delay_decrement();
 }
 
 //----------------------------------------------------------------------------
