@@ -928,11 +928,8 @@ void i2c_config(void) {
 
 void i2c_nvic_config(void)
 {
-    /* configure the NVIC peripheral */
-    nvic_priority_group_set(NVIC_PRIGROUP_PRE1_SUB3);
-
-    nvic_irq_enable(I2C0_EV_IRQn, 0, 0);
-    nvic_irq_enable(I2C0_ER_IRQn, 0, 0);
+    nvic_irq_enable(I2C0_EV_IRQn, 1, 0);
+    nvic_irq_enable(I2C0_ER_IRQn, 1, 1);
 }
 
 
