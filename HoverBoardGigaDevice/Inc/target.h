@@ -1,3 +1,6 @@
+#ifndef TARGET_H
+#define TARGET_H
+
 #ifdef GD32E230
 	#include "gd32e23x.h"
 	#define TARGET_nvic_irq_enable(a, b, c){nvic_irq_enable(a, b);}
@@ -325,7 +328,14 @@
 	#define AF_USART1_TX(pin)	(pin==PA8 ? GPIO_AF_4 : GPIO_AF_1)		// GD32F130: AF4 = PA8 , AF1 = PA2 or PA14
 	#define AF_USART1_RX(pin)	(pin==PB0 ? GPIO_AF_4 : GPIO_AF_1)		// GD32F130: AF4 = PB0 , AF1 = PA3 or PA15
 
-	#define digitalWrite(pin,set) gpio_bit_write(pin&0xffffff00U,  (BIT(pin&0xfU) ), set)
+	static void digitalWrite(uint32_t pin, FlagStatus set)
+	{
+		uint32_t port = pin & 0xffffff00U;
+		uint32_t bit = BIT(pin & 0xfU);
+		gpio_bit_write(port, bit, set);
+	}
+
+	//#define digitalWrite(pin,set) gpio_bit_write(pin&0xffffff00U,  (BIT(pin&0xfU) ), set)
 	#define digitalRead(pin) 			gpio_input_bit_get(pin&0xffffff00U, BIT(pin&0xfU))
 
 	
@@ -390,3 +400,4 @@
 	A14 A15 B3 B4 B5 B6 B7 B8 B9 	*/ 
 
 	
+#endif // TARGET_H
