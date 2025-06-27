@@ -400,12 +400,12 @@ enum lp_accel_rate_e {
 const struct gyro_reg_s reg = {
     .who_am_i       = 0x75,
     .rate_div       = 0x19,
-    .lpf            = 0x1A,
+    .lpf            = 0x1A, // Set to 0x03
     .prod_id        = 0x0C,
     .user_ctrl      = 0x6A,
     .fifo_en        = 0x23,
-    .gyro_cfg       = 0x1B,
-    .accel_cfg      = 0x1C,
+    .gyro_cfg       = 0x1B, // Set to 0x00  GYRO_CONFIG: FS_SEL = 0 → ±250 °/s
+    .accel_cfg      = 0x1C, // // ACCEL_CONFIG: AFS_SEL = 0 → ±2 g
     .motion_thr     = 0x1F,
     .motion_dur     = 0x20,
     .fifo_count_h   = 0x72,
@@ -416,7 +416,7 @@ const struct gyro_reg_s reg = {
     .int_enable     = 0x38,
     .dmp_int_status = 0x39,
     .int_status     = 0x3A,
-    .pwr_mgmt_1     = 0x6B,
+    .pwr_mgmt_1     = 0x6B, // PWR_MGMT_1: clear sleep bit
     .pwr_mgmt_2     = 0x6C,
     .int_pin_cfg    = 0x37,
     .mem_r_w        = 0x6F,
@@ -707,7 +707,7 @@ int mpu_init(void)
         return -1;
     if (mpu_set_lpf(42))
         return -1;
-    if (mpu_set_sample_rate(50))
+    if (mpu_set_sample_rate(125))
         return -1;
     if (mpu_configure_fifo(0))
         return -1;
