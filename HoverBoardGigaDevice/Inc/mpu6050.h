@@ -129,6 +129,7 @@ void mpu_get_data(void);
 /* Data post-processing */
 void mpu_read_gyro_raw(void);
 void mpu_read_accel_raw(void);
+void mpu_read_all_raw();
 void mpu_calc_euler_angles(void);
 void mpu_tap_func(unsigned char direction, unsigned char count);
 void mpu_android_orient_func(unsigned char orientation);

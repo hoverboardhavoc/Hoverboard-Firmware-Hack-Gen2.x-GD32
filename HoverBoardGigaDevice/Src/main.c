@@ -6,7 +6,7 @@
 #include "../Inc/it.h"
 #include "../Inc/bldc.h"
 #include "../Inc/commsMasterSlave.h"
-#include "../Inc/util.h"
+#include "../Inc/i2c.h"
 #include "../Inc/systick.h"
 //#include "../Inc/commsSteering.h"
 
@@ -159,7 +159,6 @@ iBug = 6;
 	
 #ifdef SELF_BALANCING_ENABLE
 	i2c_config();
-	i2c_nvic_config();
 	input_init();   
 	balance_init();
 #endif 
@@ -247,7 +246,7 @@ iBug = 9;
 		DEBUG_LedSet(	(steerCounter%20) < 10	,0)
 		
 		#ifdef SELF_BALANCING_ENABLE
-			handle_mpu6050();
+			mpu_read_all_raw();
 			balance_update();
 		#endif
 

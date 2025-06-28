@@ -27,7 +27,7 @@
 //#include "systick.h" 	
 #include "defines.h"
 #include "config.h"
-#include "util.h"
+#include "i2c.h"
 #include "mpu6050.h"
 #include "mpu6050_dmp.h"
 
@@ -3375,13 +3375,82 @@ unsigned short inv_orientation_matrix_to_scalar(const signed char *mtx)
     return scalar;
 }
 
+int mpu_config(void)
+{
+    int8_t rc;
+
+    // 1) Wake up & switch clock to PLL on X-gyro
+    //    INV_CLK_PLL == 1 → CLKSEL = 1
+    rc = i2c_writeByte(hw.addr,
+                       reg.pwr_mgmt_1,
+                       INV_CLK_PLL   /* bits[2:0] = 001 */ 
+                       /* sleep bit (6) is 0 by default */ );
+    if (rc) return rc;
+
+    // small delay for the oscillator to stabilize
+    delay_ms(10);
+
+    // 2) Disable DMP & FIFO
+    rc = i2c_writeByte(hw.addr,
+                       reg.user_ctrl,
+                       0 /* BIT_DMP_EN=0, BIT_FIFO_EN=0 */);
+    if (rc) return rc;
+    rc = i2c_writeByte(hw.addr,
+                       reg.fifo_en,
+                       0 /* no gyro/accel to FIFO */);
+    if (rc) return rc;
+
+    // 3) Sample rate divider: 1 kHz/(1 + DIV) → here DIV = 4 → 200 Hz
+    //    Use the raw value; there’s no enum for SMPLRT_DIV
+    rc = i2c_writeByte(hw.addr,
+                       reg.rate_div,
+                       4);
+    if (rc) return rc;
+
+    // 4) Configure DLPF_CFG to 42 Hz
+    //    INV_FILTER_42HZ == 3 → bits[2:0] = 011
+    rc = i2c_writeByte(hw.addr,
+                       reg.lpf,
+                       INV_FILTER_42HZ /* 3 */);
+    if (rc) return rc;
+
+    // 5) Full-scale ranges
+    //    Gyro FS_SEL bits[4:3] ← INV_FSR_250DPS << 3
+    rc = i2c_writeByte(hw.addr,
+                       reg.gyro_cfg,
+                       (INV_FSR_250DPS << 3));  // 0 << 3 = 0
+    if (rc) return rc;
+    //    Accel AFS_SEL bits[4:3] ← INV_FSR_2G << 3
+    rc = i2c_writeByte(hw.addr,
+                       reg.accel_cfg,
+                       (INV_FSR_2G << 3));      // 0 << 3 = 0
+    if (rc) return rc;
+
+    // 6) INT pin: active-high, push-pull, latch until cleared
+    //    BIT_ACTL=0, BIT_LATCH_EN=1<<5, BIT_ANY_RD_CLR=1<<4
+    rc = i2c_writeByte(hw.addr,
+                       reg.int_pin_cfg,
+                       BIT_LATCH_EN | BIT_ANY_RD_CLR);
+    if (rc) return rc;
+
+    // 7) Enable only the Data Ready interrupt
+    //    BIT_DATA_RDY_EN = 1<<0
+    rc = i2c_writeByte(hw.addr,
+                       reg.int_enable,
+                       BIT_DATA_RDY_EN);
+    if (rc) return rc;
+
+    return 0;
+}
+
+
 
 /**
  *  @}
  */
 
 /* =========================== MPU-6050 Configuration =========================== */
-int mpu_config(void)
+int mpu_config_old(void)
 {
     consoleLog("Configuring MPU6050... ");	
 
@@ -3587,6 +3656,31 @@ void mpu_get_data(void)
         
 }
 
+void mpu_read_all_raw(void)
+{
+    uint8_t buf[14];
+
+    // burst‐read accel(6) + temp(2) + gyro(6)
+    // auto‐increment register address in MPU-6050
+    
+    if (i2c_readBytes(st.hw->addr, st.reg->raw_accel, 14, buf) != I2C_OK) {
+        // handle I2C error here if you need to
+        return;
+    }
+
+    // unpack accel
+    mpu.accel.x = (int16_t)((buf[0] << 8) | buf[1]);
+    mpu.accel.y = (int16_t)((buf[2] << 8) | buf[3]);
+    mpu.accel.z = (int16_t)((buf[4] << 8) | buf[5]);
+
+    // unpack temp
+    mpu.temp    = (int16_t)((buf[6] << 8) | buf[7]);
+
+    // unpack gyro
+    mpu.gyro.x  = (int16_t)((buf[8]  << 8) | buf[9]);
+    mpu.gyro.y  = (int16_t)((buf[10] << 8) | buf[11]);
+    mpu.gyro.z  = (int16_t)((buf[12] << 8) | buf[13]);
+}
 
 /* =========================== MPU-6050 Post-processing Functions =========================== */
 

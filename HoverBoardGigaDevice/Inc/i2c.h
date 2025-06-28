@@ -18,8 +18,8 @@
 */
 
 // Define to prevent recursive inclusion
-#ifndef UTIL_H
-#define UTIL_H
+#ifndef I2C_H
+#define I2C_H
 
 #include <stdint.h>
 
@@ -54,5 +54,5 @@ int8_t i2c_readByte  (uint8_t slaveAddr, uint8_t regAddr, uint8_t *data);
 int8_t i2c_readBit   (uint8_t slaveAddr, uint8_t regAddr, uint8_t bitNum, uint8_t *data);
 
 
-#endif
+#endif // I2C_H
 

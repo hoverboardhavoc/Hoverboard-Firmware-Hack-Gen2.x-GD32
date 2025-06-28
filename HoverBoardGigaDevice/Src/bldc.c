@@ -233,7 +233,7 @@ void CalculateBLDC(void)
 		
 	// Calculate low-pass filter for pwm value
 	filter_reg = filter_reg - (filter_reg >> iFILTER_SHIFT) + bldc_inputFilterPwm;
-	bldc_outputFilterPwm = filter_reg >> iFILTER_SHIFT;
+	bldc_outputFilterPwm = bldc_inputFilterPwm; //filter_reg >> iFILTER_SHIFT;
 
 	// Update PWM channels based on position y(ellow), b(lue), g(reen)
 	//blockPWM(bldc_outputFilterPwm, pos, &y, &b, &g);

@@ -195,6 +195,14 @@
 #endif
 
 #ifdef SELF_BALANCING_ENABLE
+
+	#define I2C_TIMEOUT  10000
+	#define I2C_ACK_ENABLE  1
+	#define I2C_ACK_DISABLE 0
+
+	// return values
+	#define I2C_OK    0
+	#define I2C_ERR  -1
 	#define i2c_write                   i2c_writeBytes
 	#define i2c_read                    i2c_readBytes 
 	#define delay_ms                    delay_1ms

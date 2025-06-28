@@ -24,7 +24,7 @@
 #include "defines.h"
 #include "config.h"
 #include "setup.h"
-#include "util.h"
+#include "i2c.h"
 #include "mpu6050.h"
 #include "target.h"
 
@@ -134,40 +134,74 @@ void handle_mpu6050(void) {
 
 /* =========================== I2C WRITE Functions =========================== */
 
-/*
- * write bytes to chip register
- */
-int8_t i2c_writeBytes(uint8_t slaveAddr, uint8_t regAddr, uint8_t length, uint8_t *data)
+//------------------------------------------------------------------------------
+// Blocking write of N bytes to device @devAddr, register @regAddr.
+//------------------------------------------------------------------------------
+int8_t i2c_writeBytes(uint8_t devAddr,
+                      uint8_t regAddr,
+                      uint8_t length,
+                      uint8_t *data)
 {
+    uint32_t tmo = 0;
 
-    // assign WRITE command
-    i2c_ReadWriteCmd    = WRITE;
+    // 1) wait for bus idle
+    while (i2c_flag_get(MPU_I2C, I2C_FLAG_I2CBSY)) {
+        if (++tmo > I2C_TIMEOUT) return I2C_ERR;
+    }
 
-    // assign inputs
-    i2c_status          = -1;
-    i2c_slaveAddress    = slaveAddr << 1;       // Address is shifted one position to the left. LSB is reserved for the Read/Write bit.
-    i2c_regAddress      = regAddr;
-    i2c_txbuffer        = data;
-    i2c_nDABytes        = length;
-    i2c_nRABytes        = 1;
-
-    uint16_t i2c_timeout = 0;
-
-    // enable the I2C0 interrupt
-    i2c_interrupt_enable(MPU_I2C, I2C_INT_ERR | I2C_INT_BUF | I2C_INT_EV);
-
-    // the master waits until the I2C bus is idle
-    while(i2c_flag_get(MPU_I2C, I2C_FLAG_I2CBSY) && i2c_timeout++ < 20000);
-
-    // the master sends a start condition to I2C bus
+    // 2) send START
     i2c_start_on_bus(MPU_I2C);
-    
-    // Wait until all data bytes are sent/received
-    i2c_timeout = 0;
-    while(i2c_nDABytes > 0 && i2c_timeout++ < 20000);
+    tmo = 0;
+    while (!i2c_flag_get(MPU_I2C, I2C_FLAG_SBSEND)) {
+        if (++tmo > I2C_TIMEOUT) return I2C_ERR;
+    }
 
-    return i2c_status;
+    // 3) send slave address + write bit
+    //     — GD32 uses I2C_TRANSMITTER / I2C_RECEIVER
+    i2c_master_addressing(MPU_I2C, devAddr << 1, I2C_TRANSMITTER);
+    tmo = 0;
+    while (!i2c_flag_get(MPU_I2C, I2C_FLAG_ADDSEND)) {
+        if (++tmo > I2C_TIMEOUT) {
+            i2c_stop_on_bus(MPU_I2C);
+            return I2C_ERR;
+        }
+    }
+    // clear the address‐sent flag
+    i2c_flag_clear(MPU_I2C, I2C_FLAG_ADDSEND);
 
+    // 4) send register address
+    i2c_data_transmit(MPU_I2C, regAddr);
+    tmo = 0;
+    while (!i2c_flag_get(MPU_I2C, I2C_FLAG_TBE)) {
+        if (++tmo > I2C_TIMEOUT) {
+            i2c_stop_on_bus(MPU_I2C);
+            return I2C_ERR;
+        }
+    }
+
+    // 5) send payload bytes
+    for (uint8_t i = 0; i < length; i++) {
+        i2c_data_transmit(MPU_I2C, data[i]);
+        tmo = 0;
+        while (!i2c_flag_get(MPU_I2C, I2C_FLAG_TBE)) {
+            if (++tmo > I2C_TIMEOUT) {
+                i2c_stop_on_bus(MPU_I2C);
+                return I2C_ERR;
+            }
+        }
+    }
+
+    // 6) wait for transfer complete, then STOP
+    tmo = 0;
+    while (!i2c_flag_get(MPU_I2C, I2C_FLAG_BTC)) {
+        if (++tmo > I2C_TIMEOUT) {
+            i2c_stop_on_bus(MPU_I2C);
+            return I2C_ERR;
+        }
+    }
+    i2c_stop_on_bus(MPU_I2C);
+
+    return I2C_OK;
 }
 
 
@@ -194,45 +228,82 @@ int8_t i2c_writeBit(uint8_t slaveAddr, uint8_t regAddr, uint8_t bitNum, uint8_t 
 
 /* =========================== I2C READ Functions =========================== */
 
-/*
- * read bytes from chip register
- */
-int8_t i2c_readBytes(uint8_t slaveAddr, uint8_t regAddr, uint8_t length, uint8_t *data) 
+//------------------------------------------------------------------------------
+// Blocking read of N bytes into data[] from device @devAddr, register @regAddr.
+//------------------------------------------------------------------------------
+int8_t i2c_readBytes(uint8_t devAddr,
+                     uint8_t regAddr,
+                     uint8_t length,
+                     uint8_t *data)
 {
+    uint32_t tmo = 0;
 
-    // assign READ command
-    i2c_ReadWriteCmd    = READ;
-    
-    // assign inputs
-    i2c_status          = -1;
-    i2c_slaveAddress    = slaveAddr << 1;   // Address is shifted one position to the left. LSB is reserved for the Read/Write bit.
-    i2c_regAddress      = regAddr;
-    i2c_rxbuffer        = data;
-    i2c_nDABytes        = length;
-    i2c_nRABytes        = 1;
-
-    uint16_t i2c_timeout = 0;
-
-    // enable the I2C0 interrupt
-    i2c_interrupt_enable(MPU_I2C, I2C_INT_ERR | I2C_INT_BUF | I2C_INT_EV);
-
-    if(2 == i2c_nDABytes){
-        i2c_ackpos_config(MPU_I2C, I2C_ACKPOS_NEXT);    // send ACK for the next byte
+    // 1) wait for bus idle
+    while (i2c_flag_get(MPU_I2C, I2C_FLAG_I2CBSY)) {
+        if (++tmo > I2C_TIMEOUT) return I2C_ERR;
     }
 
-    // the master waits until the I2C bus is idle
-    while(i2c_flag_get(MPU_I2C, I2C_FLAG_I2CBSY) && i2c_timeout++ < 20000);
-
-    // the master sends a start condition to I2C bus
+    // 2) send START + slave addr (write) + regAddr
     i2c_start_on_bus(MPU_I2C);
+    tmo = 0;
+    while (!i2c_flag_get(MPU_I2C, I2C_FLAG_SBSEND)) {
+        if (++tmo > I2C_TIMEOUT) return I2C_ERR;
+    }
 
-    // Wait until all data bytes are sent/received
-    i2c_timeout = 0;
-    while(i2c_nDABytes > 0 && i2c_timeout++ < 20000);
+    i2c_master_addressing(MPU_I2C, devAddr << 1, I2C_TRANSMITTER);
+    tmo = 0;
+    while (!i2c_flag_get(MPU_I2C, I2C_FLAG_ADDSEND)) {
+        if (++tmo > I2C_TIMEOUT) {
+            i2c_stop_on_bus(MPU_I2C);
+            return I2C_ERR;
+        }
+    }
+    i2c_flag_clear(MPU_I2C, I2C_FLAG_ADDSEND);
 
-    // Return status
-    return i2c_status;
+    i2c_data_transmit(MPU_I2C, regAddr);
+    tmo = 0;
+    while (!i2c_flag_get(MPU_I2C, I2C_FLAG_TBE)) {
+        if (++tmo > I2C_TIMEOUT) {
+            i2c_stop_on_bus(MPU_I2C);
+            return I2C_ERR;
+        }
+    }
 
+    // 3) repeated-start for read
+    i2c_start_on_bus(MPU_I2C);
+    tmo = 0;
+    while (!i2c_flag_get(MPU_I2C, I2C_FLAG_SBSEND)) {
+        if (++tmo > I2C_TIMEOUT) return I2C_ERR;
+    }
+
+    i2c_master_addressing(MPU_I2C, devAddr << 1, I2C_RECEIVER);
+    tmo = 0;
+    while (!i2c_flag_get(MPU_I2C, I2C_FLAG_ADDSEND)) {
+        if (++tmo > I2C_TIMEOUT) {
+            i2c_stop_on_bus(MPU_I2C);
+            return I2C_ERR;
+        }
+    }
+    i2c_flag_clear(MPU_I2C, I2C_FLAG_ADDSEND);
+
+    // 4) read each byte
+    for (uint8_t i = 0; i < length; i++) {
+        // on last byte, disable ACK and send STOP
+        if (i == length - 1) {
+            i2c_ack_config(MPU_I2C, I2C_ACK_DISABLE);
+            i2c_stop_on_bus(MPU_I2C);
+        }
+        tmo = 0;
+        while (!i2c_flag_get(MPU_I2C, I2C_FLAG_RBNE)) {
+            if (++tmo > I2C_TIMEOUT) return I2C_ERR;
+        }
+        data[i] = i2c_data_receive(MPU_I2C);
+    }
+
+    // re-enable ACK for next time
+    i2c_ack_config(MPU_I2C, I2C_ACK_ENABLE);
+
+    return I2C_OK;
 }
 
 

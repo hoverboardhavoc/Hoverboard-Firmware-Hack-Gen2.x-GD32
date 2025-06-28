@@ -910,7 +910,6 @@ void USART2_Init(uint32_t iBaud)	// only for target==2 = gd32f103
 
 #ifdef SELF_BALANCING_ENABLE
 void i2c_config(void) {
-
     /* I2C clock configure */
     //i2c_clock_config(MPU_I2C, MPU_I2C_SPEED, I2C_DTCY_2);             // I2C duty cycle in fast mode
     i2c_clock_config(MPU_I2C, MPU_I2C_SPEED, I2C_DTCY_16_9);            // I2C duty cycle in fast mode plus
@@ -920,19 +919,7 @@ void i2c_config(void) {
     i2c_enable(MPU_I2C);
     /* enable acknowledge */
     i2c_ack_config(MPU_I2C, I2C_ACK_ENABLE);
-
-    i2c_interrupt_enable(MPU_I2C, I2C_INT_ERR);   // ITERREN @ bit 8
-    i2c_interrupt_enable(MPU_I2C, I2C_INT_EV);    // ITEVTEN @ bit 9
-    i2c_interrupt_enable(MPU_I2C, I2C_INT_BUF);   // ITBUFEN @ bit 10
 }
-
-void i2c_nvic_config(void)
-{
-    nvic_irq_enable(I2C0_EV_IRQn, 1, 0);
-    nvic_irq_enable(I2C0_ER_IRQn, 1, 1);
-}
-
-
 #endif
 
 # define TRUE												0x01
