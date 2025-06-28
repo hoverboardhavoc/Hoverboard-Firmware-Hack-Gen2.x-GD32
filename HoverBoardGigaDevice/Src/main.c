@@ -11,6 +11,7 @@
 //#include "../Inc/commsSteering.h"
 
 #include "../Inc/commsBluetooth.h"
+#include "../Inc/balance.h"
 #include "stdio.h"
 #include "stdlib.h"
 #include "string.h"
@@ -91,6 +92,10 @@ void ShowBatteryState(int8_t iLevel);
 	
 
 uint32_t iTimeNextLoop = 0;
+
+void RemoteUpdate(void) {
+
+}
 //----------------------------------------------------------------------------
 // MAIN function
 //----------------------------------------------------------------------------
@@ -156,6 +161,7 @@ iBug = 6;
 	i2c_config();
 	i2c_nvic_config();
 	input_init();   
+	balance_init();
 #endif 
 	// Init ADC
 	ADC_init();
@@ -231,6 +237,9 @@ iBug = 9;
 
 	while(1)
 	{
+
+
+
 		if (millis() < iTimeNextLoop)	
 			continue;
 		iTimeNextLoop = millis() + DELAY_IN_MAIN_LOOP;
@@ -239,6 +248,7 @@ iBug = 9;
 		
 		#ifdef SELF_BALANCING_ENABLE
 			handle_mpu6050();
+			balance_update();
 		#endif
 
 		
@@ -282,7 +292,7 @@ iBug = 9;
 			}
 
 					// Set output
-			SetPWM(pwmMaster);
+			//SetPWM(pwmMaster);
 
 			#ifdef USART_MASTERSLAVE
 				// Decide if slave will be enabled
@@ -381,7 +391,7 @@ iBug = 9;
 
 		//wState = STATE_LedBattLevel;	// overwrite wState recevied from RemoteUart or RemoteUartBus
 		
-		#if (!defined(TEST_HALL2LED)) && (!defined(DEBUG_LED))
+		/*#if (!defined(TEST_HALL2LED)) && (!defined(DEBUG_LED))
 			if (!(wState & STATE_LedBattLevel))
 			{
 				#ifdef LED_GREEN
@@ -400,7 +410,7 @@ iBug = 9;
 		#endif
 		#ifdef UPPER_LED
 			digitalWrite(UPPER_LED,wState & STATE_LedDown ? SET : RESET);
-		#endif
+		#endif*/
 
 		if (wState & STATE_Shutoff)	ShutOff();
 
@@ -462,6 +472,7 @@ int32_t ShutOff(void)
 //----------------------------------------------------------------------------
 void ShowBatteryState(int8_t iLevel)
 {
+	return;
 	#ifdef DEBUG_LED
 		return;
 	#else

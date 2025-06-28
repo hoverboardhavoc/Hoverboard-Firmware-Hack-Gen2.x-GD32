@@ -26,7 +26,9 @@
 #include "setup.h"
 #include "util.h"
 #include "mpu6050.h"
+#include "target.h"
 
+#ifdef SELF_BALANCING_ENABLE
 // Optical sensors variables
 static FlagStatus   sensor1, sensor2;           // holds the sensor1 and sensor 2 values
 static FlagStatus   sensor1_read, sensor2_read; // holds the instantaneous Read for sensor1 and sensor 2
@@ -84,17 +86,23 @@ uint8_t switch_check(uint16_t ch, uint8_t type) {
     }
 }
 
-
 /* =========================== Input Initialization Function =========================== */
 
 void input_init(void) {
     #ifdef MPU_SENSOR_ENABLE
         if(mpu_config()) {                              // IMU MPU-6050 config
             mpuStatus = ERROR;
+            digitalWrite(LED_RED,SET);
+            digitalWrite(LED_GREEN,RESET);
+
+          //  BUZZER_MorseSOS();
            // TODO gpio_bit_set(LED1_GPIO_Port, LED1_Pin);     // Turn on RED LED - sensor enabled and NOT ok
         }
         else {
             mpuStatus = SUCCESS;
+            digitalWrite(LED_RED, RESET);
+            digitalWrite(LED_GREEN,SET);
+           // BUZZER_MorseSOS();
            // TODO gpio_bit_set(LED2_GPIO_Port, LED2_Pin);     // Turn on GREEN LED - sensor enabled and ok
         }
     #endif
@@ -247,3 +255,5 @@ int8_t i2c_readBit(uint8_t slaveAddr, uint8_t regAddr, uint8_t bitNum, uint8_t *
     *data = b & (1 << bitNum);
     return status;
 }
+
+#endif // SELF_BALANCING_ENABLE

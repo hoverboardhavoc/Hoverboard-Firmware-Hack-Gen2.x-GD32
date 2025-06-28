@@ -34,6 +34,7 @@
 //#include "gd32f1x0.h"
 #include "../Inc/configSelect.h"
 
+void SendString(uint32_t usart_periph, const char *str);
 //----------------------------------------------------------------------------
 // Send buffer via USART
 //----------------------------------------------------------------------------

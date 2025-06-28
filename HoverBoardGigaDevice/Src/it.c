@@ -76,7 +76,7 @@ void ResetTimeout(void)
 //----------------------------------------------------------------------------
 void TIMEOUT_IrqHandler(void)
 {	
-	if (timeoutCounter_ms > TIMEOUT_MS)
+	/*if (timeoutCounter_ms > TIMEOUT_MS)
 	{
 		// First timeout reset all process values
 		if (timedOut == RESET)	// robo: had been RESET = bug ?
@@ -95,7 +95,7 @@ void TIMEOUT_IrqHandler(void)
 	{
 		timedOut = RESET;
 		timeoutCounter_ms++;
-	}
+	}*/
 
 #ifdef SLAVE
 	if (hornCounter_ms >= 2000)

@@ -31,7 +31,7 @@
 #include "mpu6050.h"
 #include "mpu6050_dmp.h"
 
-
+#ifdef MPU_SENSOR_ENABLE
 /* The following functions must be defined for this platform:
  * i2c_write(unsigned char slave_addr, unsigned char reg_addr,
  *      unsigned char length, unsigned char const *data)
@@ -1702,6 +1702,7 @@ int mpu_read_fifo(short *gyro, short *accel, unsigned long *timestamp,
         if (i2c_read(st.hw->addr, st.reg->int_status, 1, data))
             return -1;
         if (data[0] & BIT_FIFO_OVERFLOW) {
+            
             mpu_reset_fifo();
             return -2;
         }
@@ -3962,6 +3963,4 @@ void mpu_handle_input(char c)
     }
 #endif // SERIAL_DEBUG
 }
-
-
-
+#endif // MPU_SENSOR_ENABLE

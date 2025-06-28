@@ -30,8 +30,13 @@
 
 #include "../Inc/target.h"
 
+#include "../Inc/comms.h"
 
-	
+void SendString(uint32_t usart_periph, const char *str)
+{
+   SendBuffer(usart_periph, (uint8_t *)str, (uint8_t)strlen(str));
+}
+
 //----------------------------------------------------------------------------
 // Send buffer via USART
 //----------------------------------------------------------------------------
