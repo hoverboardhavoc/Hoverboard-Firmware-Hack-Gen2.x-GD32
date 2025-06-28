@@ -38,7 +38,7 @@
 
 #ifdef DISABLE_BUTTON
 	#undef BUTTON
-	#undef SELF_HOLD
+	//#undef SELF_HOLD
 #endif
 
 #ifdef BLDC_SINE
