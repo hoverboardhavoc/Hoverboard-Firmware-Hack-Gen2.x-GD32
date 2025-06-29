@@ -27,8 +27,6 @@
 	#define BLDC_BC			// old block commutation bldc control
 	//#define BLDC_SINE			// silent sine-pwm motor control, added 2025 by Robo Durden. 
 													// not yet for target 2  = Gen2.2.x
-	
-#define MPU_6050
 
 #define BAT_CELLS         	8       // battery number of cells. Normal Hoverboard battery: 10s
 //#define BATTERY_LOW_SHUTOFF		// will shut off the board below BAT_LOW_DEAD = BAT_CELLS * CELL_LOW_DEAD, 
@@ -57,9 +55,7 @@
 		#ifdef REMOTE_UART
 			#define SEND_IMU_DATA // send the IMU data to the remote control
 			#ifdef SEND_IMU_DATA
-				#ifndef MPU_6050
-					#error "You have to define MPU_6050 to use SEND_IMU_DATA"
-				#endif 
+				#define MPU_6050
 			#endif
 		#endif
 		#ifdef REMOTE_UARTBUS
