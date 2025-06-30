@@ -83,6 +83,9 @@ const uint8_t hall_to_pos[8] =
 void SetEnable(FlagStatus setEnable)
 {
 	bldc_enable = setEnable;
+	if (setEnable == RESET) {
+   		 __asm__ volatile ("nop");  
+	}
 }
 
 //----------------------------------------------------------------------------
@@ -91,7 +94,11 @@ void SetEnable(FlagStatus setEnable)
 void SetPWM(int16_t setPwm)
 {
 	//bldc_inputFilterPwm = CLAMP(1.125 * setPwm, -BLDC_TIMER_MID_VALUE, BLDC_TIMER_MID_VALUE); // thanks to WizzardDr, bldc.c: pwm_res = 72000000 / 2 / PWM_FREQ; == 2250 and not 2000
-	
+	if (setPwm == 0)
+	{
+    	__asm__ volatile ("nop");  
+	}
+
 	bldc_inputFilterPwm =  BLDC_TIMER_MID_VALUE*(setPwm/1000.0);	// thanks to WizzardDr, bldc.c: pwm_res = 72000000 / 2 / PWM_FREQ; == 2250 and not 2000
 	bldc_inputFilterPwm =  CLAMP(bldc_inputFilterPwm ,-BLDC_TIMER_MID_VALUE, BLDC_TIMER_MID_VALUE); 	
 }
@@ -233,7 +240,7 @@ void CalculateBLDC(void)
 		
 	// Calculate low-pass filter for pwm value
 	filter_reg = filter_reg - (filter_reg >> iFILTER_SHIFT) + bldc_inputFilterPwm;
-	bldc_outputFilterPwm = filter_reg >> iFILTER_SHIFT;
+	bldc_outputFilterPwm = bldc_inputFilterPwm; // filter_reg >> iFILTER_SHIFT;
 
 	// Update PWM channels based on position y(ellow), b(lue), g(reen)
 	//blockPWM(bldc_outputFilterPwm, pos, &y, &b, &g);

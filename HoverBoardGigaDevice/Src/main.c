@@ -365,7 +365,9 @@ iBug = 9;
 			enable = SET;			
 		#endif
 		
-		if (wState & STATE_Disable)	enable = RESET;
+		if (wState & STATE_Disable){
+			enable = RESET;
+		}
 		
 		// Enable is depending on arm switch
 		//#ifdef USART_CRSF
