@@ -35,15 +35,20 @@
 //----------------------------------------------------------------------------
 // Send buffer via USART
 //----------------------------------------------------------------------------
-void SendBuffer(uint32_t usart_periph, uint8_t buffer[], uint8_t length)
+void SendBuffer(uint32_t usart_periph, uint8_t *buffer, uint8_t length)
 {
-	uint8_t index = 0;
-	
-	for(; index < length; index++)
-	{
-    usart_data_transmit(usart_periph, buffer[index]);
-    while (usart_flag_get(usart_periph, USART_FLAG_TC) == RESET) {}
-	}
+    // 1) For each byte, wait only for Transmit Data Register Empty (TBE),
+    //    not for full Transmission Complete (TC).
+    for (uint8_t i = 0; i < length; i++) {
+        usart_data_transmit(usart_periph, buffer[i]);
+        while (usart_flag_get(usart_periph, USART_FLAG_TBE) == RESET) {
+            // busy‐wait for DR empty (next byte can be sent)
+        }
+    }
+    // 2) At the end, wait once for the last byte to actually shift out
+    while (usart_flag_get(usart_periph, USART_FLAG_TC) == RESET) {
+        // busy‐wait for final transmission complete
+    }
 }
 
 //----------------------------------------------------------------------------
