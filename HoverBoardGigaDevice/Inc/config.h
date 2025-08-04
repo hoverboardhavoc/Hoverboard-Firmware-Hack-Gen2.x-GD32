@@ -111,7 +111,7 @@
 #define PWM_FREQ         		16000     // PWM frequency in Hz
 
 
-#define FILTER_SHIFT 12 						// Low-pass filter for pwm, rank k=12
+#define FILTER_SHIFT 7 						// Low-pass filter for pwm, rank k=12
 
 
 #define DELAY_IN_MAIN_LOOP 	5         // Delay in ms

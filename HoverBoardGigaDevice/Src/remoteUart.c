@@ -80,6 +80,7 @@ typedef struct{
 	int16_t     iAccelY;
 	int16_t     iAccelZ;
 	int16_t     iTemperature;
+	int16_t		iHallTicksDelta;
    uint16_t checksum;
 } SerialHover2ServerImu;
 #endif
@@ -92,6 +93,17 @@ uint32_t iTimeLastRx = 0;
 uint32_t iTimeNextTx = 0;
 
 #ifdef SEND_IMU_DATA
+
+int16_t getOdomDelta16(void) {
+    static int32_t prevOdom = 0;
+    int32_t cur = iOdom;
+    // wrap-safe subtraction in unsigned domain
+    uint32_t udelta = (uint32_t)cur - (uint32_t)prevOdom;
+    prevOdom = cur;
+    // direct cast to int16 — well within limits
+    return (int16_t)udelta;
+}
+
 void RemoteUpdateIMU() {
 	SerialHover2ServerImu oData;
 	oData.cStart = START_FRAME;
@@ -102,6 +114,7 @@ void RemoteUpdateIMU() {
 	oData.iAccelX = mpuData.accel.x;
 	oData.iAccelY = mpuData.accel.y;
 	oData.iAccelZ = mpuData.accel.z;
+	oData.iHallTicksDelta = getOdomDelta16();
 	oData.iTemperature = mpuData.temperature;
 	oData.checksum = CalcCRC((uint8_t*) &oData, sizeof(oData) - 2);	// (first bytes except crc)
 	SendBuffer(USART_REMOTE, (uint8_t*) &oData, sizeof(oData));
