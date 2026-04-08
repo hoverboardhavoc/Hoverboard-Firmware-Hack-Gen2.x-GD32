@@ -20,7 +20,10 @@
 #define VBATT PA4
 #define ADC_BATTERY_VOLT      0.02507  	// V_Batt to V_BattMeasure = factor 30: ( (ADC-Data/4095) *3,3V *30 )
 
-//#define CURRENT_DC P??		// this board does not have a shunt resistor !
+//#define CURRENT_DC P??		// this board does not have a DC bus shunt resistor
+#define PHASE_CURRENT_Y	PB0		// low-side shunt on yellow phase
+#define PHASE_CURRENT_B	PB1		// low-side shunt on blue phase
+// no shunt on green phase
 
 #define SELF_HOLD	PB12
 #define BUTTON PA12
