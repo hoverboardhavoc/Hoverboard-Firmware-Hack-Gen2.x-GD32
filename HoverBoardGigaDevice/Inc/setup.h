@@ -47,7 +47,7 @@ void gpio_init(void);	// Initializes the GPIOs
 void pwm_init(void);	// Initializes the PWM
 void ADC_init(void);	// Initializes the ADC
 #if defined(PHASE_CURRENT_A) && defined(PHASE_CURRENT_B)
-void ADC_Trigger_Timer_init(void);	// TIMER2 as slave of TIMER0, drives ADC trigger at a fixed offset past the PWM valley
+void adc_trigger_timer_init(void);	// TIM3 as slave of TIM1, drives ADC trigger at a fixed offset past the PWM valley
 #endif
 
 void usart0_init(uint32_t iBaud);

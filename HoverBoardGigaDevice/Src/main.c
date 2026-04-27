@@ -176,7 +176,7 @@ int main (void)
 		// TIMER2 hardware-triggers the ADC from TIMER0's valley. Must be
 		// set up before pwm_init enables TIMER0, so TIMER2 is ready to
 		// respond to the first TRGO.
-		ADC_Trigger_Timer_init();
+		adc_trigger_timer_init();
 	#endif
 
 	// Init PWM

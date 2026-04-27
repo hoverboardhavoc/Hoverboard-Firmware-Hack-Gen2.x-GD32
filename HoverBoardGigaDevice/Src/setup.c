@@ -581,47 +581,60 @@ void pwm_init(void)
 	#define FOC_SAMPLE_OFFSET_TICKS 10   // ~140 ns at 72 MHz — essentially at the valley
 #endif
 
-void ADC_Trigger_Timer_init(void)
+//----------------------------------------------------------------------------
+// adc_trigger_timer_init — TIMER2 (= libopencm3 TIM3) as a fixed-offset
+// slave to TIMER0 (= TIM1)'s TRGO. Phase 2 stage 5b.
+//
+// Hardware pipeline (no CPU in the loop after init):
+//
+//   TIM1 UPIF (PWM valley) ──TRGO──> TIM3 reset (slave restart mode)
+//                                       │
+//                                       │ counts up from 0 at 72 MHz
+//                                       ▼
+//                            TIM3 CH1 compare at FOC_SAMPLE_OFFSET_TICKS
+//                                       │
+//                                       │ rising edge of OC1REF → TRGO
+//                                       ▼
+//                  ADC regular group (ETSRC = T2_TRGO) starts scan
+//
+// libopencm3 channel naming offset by 1 from GD: TIMER_CH_0 (GD) = TIM_OC1
+// (libopencm3). Same hardware, different vendor numbering.
+//----------------------------------------------------------------------------
+void adc_trigger_timer_init(void)
 {
-	rcu_periph_clock_enable(RCU_TIMER2);
-	timer_deinit(TIMER2);
+	rcc_periph_clock_enable(RCC_TIM3);
+	rcc_periph_reset_pulse(RST_TIM3);
 
-	timer_parameter_struct tp;
-	tp.prescaler         = 0;                         // TIMER_CK = 72 MHz
-	tp.alignedmode       = TIMER_COUNTER_EDGE;        // plain up-counter
-	tp.counterdirection  = TIMER_COUNTER_UP;
-	tp.period            = 0xFFFF;                    // never overflows within a PWM period
-	tp.clockdivision     = TIMER_CKDIV_DIV1;
-	tp.repetitioncounter = 0;
-	timer_init(TIMER2, &tp);
+	// Plain up-counter at 72 MHz, period 0xFFFF (never overflows within a
+	// 62.5 µs PWM half-period). CKD=DIV1, EDGE alignment, rep=0.
+	timer_set_mode(TIM3, TIM_CR1_CKD_CK_INT, TIM_CR1_CMS_EDGE, TIM_CR1_DIR_UP);
+	timer_set_prescaler(TIM3, 0);
+	timer_set_period(TIM3, 0xFFFF);
+	timer_set_repetition_counter(TIM3, 0);
 
-	// Slave mode: restart on every ITI0 (= TIMER0 TRGO) rising edge.
-	timer_input_trigger_source_select(TIMER2, TIMER_SMCFG_TRGSEL_ITI0);
-	timer_slave_mode_select(TIMER2, TIMER_SLAVE_MODE_RESTART);
+	// Slave mode: reset (= restart) on every ITI0 rising edge. ITI0 on
+	// TIM3 maps to TIM1 TRGO per F1x0 reference manual §15 "Slave mode
+	// example table". libopencm3's TIM_SMCR_SMS_RM = "reset mode" =
+	// SPL's TIMER_SLAVE_MODE_RESTART (counter clears to 0 on trigger).
+	timer_slave_set_trigger(TIM3, TIM_SMCR_TS_ITR0);
+	timer_slave_set_mode(TIM3, TIM_SMCR_SMS_RM);
 
-	// CH0 output compare — no pin routed out; we only need the internal
-	// compare event. Sample offset in TIMER_CK ticks past the valley.
-	timer_oc_parameter_struct oc;
-	oc.outputstate  = TIMER_CCX_DISABLE;   // no pin output
-	oc.outputnstate = TIMER_CCXN_DISABLE;
-	oc.ocpolarity   = TIMER_OC_POLARITY_HIGH;
-	oc.ocnpolarity  = TIMER_OCN_POLARITY_HIGH;
-	oc.ocidlestate  = TIMER_OC_IDLE_STATE_LOW;
-	oc.ocnidlestate = TIMER_OCN_IDLE_STATE_LOW;
-	timer_channel_output_config(TIMER2, TIMER_CH_0, &oc);
-	// PWM1 generates a rising edge on OxREF (and hence O0CPRE → TRGO) at
-	// the compare match. TIMER_OC_MODE_TIMING (frozen, OCM=000) never
-	// toggles OxREF, so TRGO stayed flat and the ADC never fired.
-	timer_channel_output_mode_config(TIMER2, TIMER_CH_0, TIMER_OC_MODE_PWM1);
-	timer_channel_output_pulse_value_config(TIMER2, TIMER_CH_0, FOC_SAMPLE_OFFSET_TICKS);
+	// CH1 (= GD CH_0) output compare in PWM mode 1, value =
+	// FOC_SAMPLE_OFFSET_TICKS (10 ticks ≈ 140 ns past the valley). PWM1
+	// raises OC1REF at compare match, which feeds the master-mode TRGO.
+	// Output pin disabled — we only need the internal OC1REF for the
+	// trigger; nothing routed to the package.
+	timer_disable_oc_output(TIM3, TIM_OC1);
+	timer_set_oc_mode(TIM3, TIM_OC1, TIM_OCM_PWM1);
+	timer_set_oc_value(TIM3, TIM_OC1, FOC_SAMPLE_OFFSET_TICKS);
 
-	// Route compare event to TRGO (MMC=100, O0CPRE source).
-	timer_master_output_trigger_source_select(TIMER2, TIMER_TRI_OUT_SRC_O0CPRE);
+	// TRGO source = OC1REF (MMS = COMPARE_OC1REF = 0b100). Maps to SPL's
+	// TIMER_TRI_OUT_SRC_O0CPRE.
+	timer_set_master_mode(TIM3, TIM_CR2_MMS_COMPARE_OC1REF);
 
-	// Leave CEN=0 here — TIMER0's TRGO will start TIMER2 via the slave
-	// restart mechanism. If TIMER0 is stopped, TIMER2 naturally stops
-	// receiving triggers so no ADC conversions happen.
-	timer_enable(TIMER2);
+	// CEN=1: counter runs, then gets reset by TIM1 TRGO each cycle.
+	// (Slave reset mode resets the counter but doesn't toggle CEN.)
+	timer_enable_counter(TIM3);
 }
 #endif
 
