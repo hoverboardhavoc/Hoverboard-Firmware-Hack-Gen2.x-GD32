@@ -37,12 +37,27 @@ CFLAGS  := -Os -Wall -Wextra -ffunction-sections -fdata-sections \
 SRCS := Src/setup.c Src/it.c Src/main.c Src/comms.c Src/bldc.c Src/led.c
 OBJS := $(SRCS:.c=.o)
 
-all: $(OBJS)
+ifeq ($(TARGET),gd32f10x)
+    LDSCRIPT := link_gd32f103.ld
+else
+    LDSCRIPT := link_gd32f130.ld
+endif
+
+LDFLAGS := $(CPU_FLAGS) -nostartfiles -L$(OPENCM3_DIR)/lib -T$(LDSCRIPT) \
+           -Wl,--gc-sections -specs=nosys.specs
+
+BIN := hoverboard_$(TARGET)
+
+all: $(OBJS) $(BIN).elf
+
+$(BIN).elf: $(OBJS) $(OPENCM3_DIR)/lib/lib$(LIB_NAME).a $(LDSCRIPT)
+	$(CC) $(LDFLAGS) -o $@ $(OBJS) -l$(LIB_NAME)
+	$(PREFIX)size $@
 
 %.o: %.c
 	$(CC) $(CFLAGS) -c $< -o $@
 
 clean:
-	rm -f $(OBJS)
+	rm -f $(OBJS) $(BIN).elf $(BIN).bin
 
 .PHONY: all clean
