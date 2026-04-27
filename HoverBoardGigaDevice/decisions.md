@@ -8,7 +8,7 @@
 | 2. gpio_init | ✅ none needed | ✅ pattern-validated (single pin) | ✅ | ✅ |
 | 3. watchdog_init | ✅ none needed | ✅ libopencm3/gd32f1x0 leg added | ✅ match | ✅ |
 | 4. usart0_init | ✅ none needed | ✅ existing usart+dma legs | ✅ benign CR3=0 | ✅ |
-| 5. pwm_init | ⬜ (advanced timer) | ✅ (basic) | ⬜ | ⬜ |
+| 5. pwm_init | ✅ none needed | ✅ basic-init covered, output/break per-call mapped | ⬜ partial vector | ✅ |
 | 6. adc_trigger_timer_init | ⬜ | missing | ⬜ | ⬜ |
 | 7. adc_init | ⬜ (large) | partial | ⬜ | ⬜ |
 | ISR rename in `it.c` | n/a | n/a | n/a | ⬜ |
