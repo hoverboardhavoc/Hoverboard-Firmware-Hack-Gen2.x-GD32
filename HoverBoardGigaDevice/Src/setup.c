@@ -129,34 +129,40 @@ ErrStatus watchdog_init(void)
 }
 
 //----------------------------------------------------------------------------
-// Initializes the timeout timer
+// timeout_timer_init — TIMER13 (= TIM14 lp) at 1 kHz for the steering /
+// command timeout watchdog. Fires every 1 ms via tim14_isr in it.c.
+//
+// Not in the brief's Phase 2 list but called from main.c → needs to be
+// ported for the firmware to function.
+//
+// TIM14 is a 16-bit general-purpose timer with no center-aligned mode
+// (CR1.CMS is reserved on this peripheral per the GD32F1x0 RM). The SPL
+// path used CENTER_DOWN with period=SystemCoreClock/2/TIMEOUT_FREQ=36000
+// at PSC=0 — center alignment counted up + down, total cycles = 72000,
+// half-period = 1 ms, UPIF fires once per period.
+//
+// Without center mode we use EDGE up-counting with PSC=1 (divide by 2)
+// → timer clock = 36 MHz, ARR = 36000-1, UPIF every 36000 cycles =
+// every 1 ms. Same effective tick rate, different register encoding.
 //----------------------------------------------------------------------------
-void TimeoutTimer_init(void)
+void timeout_timer_init(void)
 {
-	// Enable timer clock
-	rcu_periph_clock_enable(RCU_TIMER_TIMEOUT);
-	
-	// Initial deinitialize of the timer
-	
-	timer_deinit(TIMER_TIMEOUT);
-	
-	// Set up the basic parameter struct for the timer
-	// Update event will be fired every 1ms
-	timeoutTimer_paramter_struct.counterdirection 	= TIMER_COUNTER_UP;
-	timeoutTimer_paramter_struct.prescaler 					= 0;
-	timeoutTimer_paramter_struct.alignedmode 				= TIMER_COUNTER_CENTER_DOWN;
-	timeoutTimer_paramter_struct.period							= SystemCoreClock / 2 / TIMEOUT_FREQ;
-	timeoutTimer_paramter_struct.clockdivision 			= TIMER_CKDIV_DIV1;
-	timeoutTimer_paramter_struct.repetitioncounter 	= 0;
-	timer_auto_reload_shadow_disable(TIMER_TIMEOUT);
-	timer_init(TIMER_TIMEOUT, &timeoutTimer_paramter_struct);
-	
-	// Enable TIMER_INT_UP interrupt and set priority
-	TARGET_nvic_irq_enable(TIMER_TIMEOUT_IRQn, 3, 0);		// can not interrupt 0 (hall_irq) or 1 (CalculateBLDC) or 2 (Usart)
-	timer_interrupt_enable(TIMER_TIMEOUT, TIMER_INT_UP);
-	
-	// Enable timer
-	timer_enable(TIMER_TIMEOUT);
+	rcc_periph_clock_enable(RCC_TIM14);
+	rcc_periph_reset_pulse(RST_TIM14);
+
+	timer_set_mode(TIM14, TIM_CR1_CKD_CK_INT, TIM_CR1_CMS_EDGE, TIM_CR1_DIR_UP);
+	timer_set_prescaler(TIM14, 1);
+	timer_set_period(TIM14, (SystemCoreClock / 2 / TIMEOUT_FREQ) - 1);
+	timer_set_repetition_counter(TIM14, 0);
+	timer_disable_preload(TIM14);
+
+	// NVIC priority 3: cannot interrupt 0 (BLDC/hall), 1 (ADC), or 2
+	// (USART). << 4 because Cortex-M3 implements only the upper 4 bits.
+	nvic_set_priority(NVIC_TIM14_IRQ, 3 << 4);
+	nvic_enable_irq(NVIC_TIM14_IRQ);
+	timer_enable_irq(TIM14, TIM_DIER_UIE);
+
+	timer_enable_counter(TIM14);
 }
 
 //----------------------------------------------------------------------------

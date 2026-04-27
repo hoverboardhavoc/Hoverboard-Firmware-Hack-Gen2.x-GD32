@@ -129,7 +129,7 @@ int main (void)
 
 	#if TARGET != 3	// did not work for gd32e230 :-/
 		// Init timeout timer
-		TimeoutTimer_init();
+		timeout_timer_init();
 	#endif
 
 	// Init GPIOs
