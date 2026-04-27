@@ -1,102 +1,109 @@
 # Hoverboard libopencm3 port — workflow + status
 
-This subdirectory is the proof-of-concept that demonstrates the
-hoverboard firmware *can* be built against libopencm3 (instead of the
-GigaDevice SPL it uses today), targeting both the GD32F103 (F10x family)
-and GD32F130 (F1x0 family) variants.
+This is the **actual** port of the hoverboard firmware to libopencm3
+(replacing the GigaDevice SPL it uses today). Targets: GD32F103 (F10x
+family) and GD32F130 (F1x0 family).
 
-The actual port — rewriting the project's 11,719 lines of `.c` to
-replace gd-spl API calls with libopencm3 equivalents — is **not yet
-done**. This subdirectory is the build harness + a single
-proof-of-concept file (LED blink + IWDG) to validate the toolchain
-plumbing.
+For toolchain validation only (the LED-blink demo) see
+`../libopencm3-toolchain-test/`.
 
-## What's here
+## Status
 
-- `Makefile` — minimal build harness. Builds `blink_<target>.elf` plus
-  `.bin` for either target.
-- `main_blink.c` — single-file demo using libopencm3 GPIO + IWDG. Same
-  source compiles for both families (the GPIO API differs but is gated
-  by a `#if defined(GD32F1X0)` block).
-- `link_gd32f103.ld` / `link_gd32f130.ld` — minimal linker scripts
-  (memory map per chip; vector table at the bottom of FLASH).
+The port is **in progress**. Track per-file:
 
-## How to build
+| file | status | notes |
+|---|---|---|
+| `Src/setup.c` | partial | `Interrupt_init`, `Watchdog_init` ported; `GPIO_init` ported for the LED pin; `PWM_init`/`ADC_init`/`USART_*_init`/`TimeoutTimer_init` are stubs |
+| `Src/main.c` | not started | depends on setup.c being done |
+| `Src/it.c` | not started | interrupt handlers; `usart1_isr` etc. naming |
+| `Src/bldc*.c` | not started | timing-critical, port LAST |
+| `Src/comms.c` | not started | depends on USART being ported |
+| `Src/imuMPU6050.c` / `bmi160.c` | not started | needs I2C |
+| `Src/RemoteAdc.c` | not started | needs ADC |
 
-Prereqs:
-- `arm-none-eabi-gcc` on PATH.
-- The libopencm3 fork at `~/dev/c/libopencm3` (sibling of this repo's
-  parent) with the GD32F10x and GD32F1x0 stubs enabled. That's the
-  `hoverboardhavoc/libopencm3` fork's `master` branch — already pushed.
-
+`Src/setup.c` compiles cleanly for both targets:
 ```
-$ make TARGET=gd32f10x   # for GD32F103
-$ make TARGET=gd32f1x0   # for GD32F130
+make TARGET=gd32f1x0   # GD32F130: clean
+make TARGET=gd32f10x   # GD32F103: clean (NVIC warning is a libopencm3-stub TODO, not a porting bug)
 ```
 
-Both produce a ~320–360 byte `.elf`. Tested locally; not yet
-bench-validated on real silicon.
+## How to extend the port
 
-## How to extend (i.e., port the actual hoverboard code)
+The build uses **per-file compile** (no link yet) since most files
+aren't ported. Add a file to `SRCS` in the Makefile to start porting it.
 
-The hoverboard uses ~50 distinct gd-spl API calls across `setup.c`,
-`main.c`, the BLDC files, comms, and IMU drivers. Most have direct
-libopencm3 equivalents. Roughly:
+For each function in setup.c marked STUB:
+1. Read the original in `../HoverBoardGigaDevice/Src/setup.c`.
+2. Look up each gd-spl call in the translation table below.
+3. Rewrite using libopencm3 — keep the function signature.
+4. `make TARGET=gd32f1x0` to build; iterate.
+
+When all of setup.c is ported, switch to per-file compile of `it.c`,
+`comms.c`, etc., adding stubs for any helper functions called in setup.c
+that aren't yet themselves ported.
+
+Once a coherent set links (probably setup.c + it.c + comms.c + main.c),
+swap the Makefile's per-file compile for a real link step targeting an
+ELF binary.
+
+## gd-spl → libopencm3 translation table
 
 | gd-spl                                        | libopencm3                                               |
 |---|---|
-| `timer_init(TIMER0, &init_struct)`            | `timer_set_mode` + `timer_set_period` + `timer_set_prescaler` + `timer_set_repetition_counter` |
-| `timer_event_software_generate(TIMER0, UPG)`  | `timer_generate_event(TIM1, TIM_EGR_UG)`                 |
-| `dma_init(DMA_CH0, &init_struct)`             | `dma_set_peripheral_address` + `dma_set_memory_address` + `dma_set_number_of_data` + `dma_set_*_size` + `dma_set_priority` (multi-call) |
-| `dma_circulation_enable(DMA_CH0)`             | `dma_enable_circular_mode(DMA1, DMA_CHANNEL1)`           |
-| `dma_channel_enable(DMA_CH0)`                 | `dma_enable_channel(DMA1, DMA_CHANNEL1)`                 |
-| `usart_baudrate_set(USART0, 115200)`          | `usart_set_baudrate(USART1, 115200)`                     |
-| `usart_word_length_set(USART0, USART_WL_8BIT)`| `usart_set_databits(USART1, 8)`                          |
-| `usart_enable(USART0)`                        | `usart_enable(USART1)`                                   |
-| `gpio_mode_set(GPIOA, MODE_OUTPUT, PUPD_NONE, PIN_5)` (F1x0 v2) | `gpio_mode_setup(GPIOA, GPIO_MODE_OUTPUT, GPIO_PUPD_NONE, GPIO5)` |
-| `gpio_init(GPIOA, MODE_OUT_PP, OSPEED_50MHZ, PIN_5)` (F10x v1)  | `gpio_set_mode(GPIOA, OUTPUT_50_MHZ, OUTPUT_PUSHPULL, GPIO5)` |
-| `fwdgt_config(0x0FFF, FWDGT_PSC_DIV16)`       | `iwdg_set_period_ms(2048)`                                |
-| `fwdgt_enable()`                              | `iwdg_start()`                                            |
-| `fwdgt_counter_reload()`                      | `iwdg_reset()`                                            |
-| `adc_regular_channel_config(0, ch, smptime)`  | `adc_set_regular_sequence(ADC1, 1, &ch)` + `adc_set_sample_time(ADC1, ch, smptime)` |
-| `adc_calibration_enable()`                    | `adc_calibrate(ADC1)`                                     |
-| `i2c_clock_config(I2C0, 100000, DTCY_2)`      | `i2c_set_clock_frequency(I2C1, freq_mhz)` + `i2c_set_ccr(I2C1, value)` (v1 family) |
-| `i2c_enable(I2C0)`                            | `i2c_peripheral_enable(I2C1)`                             |
-| `nvic_irq_enable(IRQn, prio, sub_prio)` (SPL) | `nvic_enable_irq(IRQn)` + `nvic_set_priority(IRQn, prio_byte)` |
+| `nvic_priority_group_set(NVIC_PRIGROUP_PRE4_SUB0)` | `scb_set_priority_grouping(SCB_AIRCR_PRIGROUP_GROUP16_NOSUB)` |
+| `nvic_irq_enable(IRQn, prio, sub)` (SPL macro) | `nvic_enable_irq(IRQn) + nvic_set_priority(IRQn, prio<<4)` |
+| `rcu_periph_clock_enable(RCU_GPIOA)`           | `rcc_periph_clock_enable(RCC_GPIOA)`                     |
+| `fwdgt_config(0x0FFF, FWDGT_PSC_DIV16)` + `fwdgt_enable()` | `iwdg_set_period_ms(2048) + iwdg_start()` |
+| `fwdgt_counter_reload()`                       | `iwdg_reset()`                                            |
+| `gpio_mode_set(PORT, MODE_OUTPUT, PUPD_NONE, PIN)` (F1x0 v2) | `gpio_mode_setup(PORT, GPIO_MODE_OUTPUT, GPIO_PUPD_NONE, PIN)` |
+| `gpio_output_options_set(PORT, OTYPE_PP, OSPEED_50MHZ, PIN)` (F1x0 v2) | `gpio_set_output_options(PORT, GPIO_OTYPE_PP, GPIO_OSPEED_HIGH, PIN)` (note: HIGH, not 50MHZ — see decisions/v0.5/GPIO.md) |
+| `gpio_init(PORT, MODE_OUT_PP, OSPEED_50MHZ, PIN)` (F10x v1) | `gpio_set_mode(PORT, GPIO_MODE_OUTPUT_50_MHZ, GPIO_CNF_OUTPUT_PUSHPULL, PIN)` |
+| `timer_init(TIMER0, &init_struct)` | `timer_set_mode + timer_set_period + timer_set_prescaler + timer_set_repetition_counter` |
+| `timer_event_software_generate(TIMER0, UPG)` | `timer_generate_event(TIM1, TIM_EGR_UG)` |
+| `dma_init(DMA_CH0, &init_struct)` | `dma_set_peripheral_address + dma_set_memory_address + dma_set_number_of_data + dma_set_*_size + dma_set_priority` |
+| `dma_circulation_enable(DMA_CH0)` | `dma_enable_circular_mode(DMA1, DMA_CHANNEL1)` |
+| `dma_channel_enable(DMA_CH0)` | `dma_enable_channel(DMA1, DMA_CHANNEL1)` |
+| `usart_baudrate_set(USART0, 115200)` | `usart_set_baudrate(USART1, 115200)` |
+| `usart_word_length_set(USART0, USART_WL_8BIT)` | `usart_set_databits(USART1, 8)` |
+| `usart_enable(USART0)` | `usart_enable(USART1)` |
+| `adc_regular_channel_config(rank, ch, smptime)` | `adc_set_regular_sequence(ADC1, length, channels[]) + adc_set_sample_time(ADC1, ch, smptime)` |
+| `adc_calibration_enable()` | `adc_calibrate(ADC1)` |
+| `adc_data_alignment_config(ADC_DATAALIGN_RIGHT)` | `adc_set_right_aligned(ADC1)` |
+| `adc_external_trigger_config(REGULAR, ENABLE)` | `adc_enable_external_trigger_regular(ADC1, ...)` |
+| `i2c_clock_config(I2C0, 100000, DTCY_2)` | `i2c_set_clock_frequency(I2C1, freq) + i2c_set_ccr(I2C1, value)` |
+| `i2c_enable(I2C0)` | `i2c_peripheral_enable(I2C1)` |
 
-For per-call empirical equivalence evidence, see the regtrace decision
+For per-call empirical equivalence evidence see the regtrace decision
 documents at `~/dev/regtrace/decisions/v0.{1,2,5}/` and the captured
-golden traces under `~/dev/regtrace/golden/`. Each decision document
-explains the share-or-split rationale for that peripheral.
+golden traces under `~/dev/regtrace/golden/`.
 
-The recommended order of porting:
-1. **Setup the build first.** Take this Makefile and gradually add real
-   source files to `SRCS`. Each compile-and-link iteration tells you
-   what's still wired to gd-spl.
-2. **GPIO then RCC.** Most-pervasive, lowest-risk APIs. Once GPIO compiles,
-   the rest of the project's pin-toggle code is unblocked.
-3. **TIMER.** Critical for FOC + the watchdog reload tick.
-4. **DMA + ADC together.** They're tightly coupled (ADC streams via DMA).
-5. **USART.** Required for comms (master-slave + steering).
-6. **I2C.** For the IMU. Note the hoverboard already uses a bit-bang
-   fallback (`i2c.c`) for some IMU reads — that path is gd-spl-free
-   already and can stay as-is.
-7. **Interrupt handlers** (`it.c`). Replace SPL-named handlers
-   (`USART0_IRQHandler` etc.) with libopencm3-named ones (`usart1_isr`).
+## Known divergences worth flagging in code review
 
-Each step is independent and incrementally testable. A good intermediate
-goal is "LED + IWDG + USART comms" — that's enough to flash the board and
-confirm RTT printf works, without needing the motor running.
+1. **`GPIO_OSPEED_50MHZ` vs `GPIO_OSPEED_HIGH`**. libopencm3 defines
+   `GPIO_OSPEED_50MHZ = 0x2` (the F2/F3/F4 50 MHz value), but on STM32F0
+   (which gd32/f1x0 forwards to) the 50 MHz speed is encoded as `0x3`,
+   exposed as `GPIO_OSPEED_HIGH`. Use `_HIGH` when targeting F1x0 via
+   libopencm3, otherwise the OSPEEDR write is wrong. Surfaced
+   empirically by regtrace's GPIO vector.
+
+2. **NVIC sub-priority dropped**. gd-spl's `nvic_irq_enable(IRQn, p, s)`
+   takes (preempt-priority, sub-priority); libopencm3's `nvic_set_priority`
+   takes a single 8-bit value (left-shifted into the upper 4 bits on
+   Cortex-M3/M4). The hoverboard always uses `PRE4_SUB0` (no sub-priority),
+   so the porting drops the sub-priority arg.
+
+3. **IWDG window mode not exposed**. The hoverboard's `Watchdog_init`
+   calls `fwdgt_window_value_config` to gate reloads inside a window.
+   libopencm3's iwdg_common_v2 doesn't expose this; the hoverboard's
+   actual reload pattern (inside the main loop) sits well inside any
+   conceivable window so the port drops it.
 
 ## What this PR does NOT do
 
-- Replace the gd-spl `framework = spl` with a libopencm3 framework in
-  `platformio.ini`. PlatformIO has no upstream libopencm3 framework
-  integration; using libopencm3 means stepping outside PlatformIO (or
-  writing a custom `framework-libopencm3` package, which is its own
-  body of work).
-- Bench-validate anything. Trace-equivalence (proven by regtrace at the
-  register level) is necessary but not sufficient — real silicon needs
-  bench testing for timing, peripheral feedback, and interrupt handling.
-- Touch the BLDC commutation code. That's the most timing-critical part
-  of the firmware and should be the LAST thing ported, not the first.
+- The vast majority of `Src/setup.c` (~28 of ~30 functions still STUB).
+- `main.c` and any other `.c` file under `Src/`.
+- A working ELF — only per-file compile is wired up.
+- PlatformIO support. The build uses a hand-rolled Makefile against the
+  libopencm3 fork; PlatformIO has no upstream libopencm3 framework.
+- Bench validation. Trace-equivalence (proven by regtrace) is necessary
+  but not sufficient.
