@@ -7,7 +7,7 @@
 | 1. clock_init | ✅ rcc.h+rcc.c (MUL17..32, HSI_72MHZ) | ✅ | ✅ (decided) | ✅ |
 | 2. gpio_init | ✅ none needed | ✅ pattern-validated (single pin) | ✅ | ✅ |
 | 3. watchdog_init | ✅ none needed | ✅ libopencm3/gd32f1x0 leg added | ✅ match | ✅ |
-| 4. usart0_init | ⬜ | partial | ⬜ | ⬜ |
+| 4. usart0_init | ✅ none needed | ✅ existing usart+dma legs | ✅ benign CR3=0 | ✅ |
 | 5. pwm_init | ⬜ (advanced timer) | ✅ (basic) | ⬜ | ⬜ |
 | 6. adc_trigger_timer_init | ⬜ | missing | ⬜ | ⬜ |
 | 7. adc_init | ⬜ (large) | partial | ⬜ | ⬜ |
@@ -68,6 +68,80 @@ extension lands) is the operative milestone — the firmware build is
 green only at the very end. Each commit boundary should align with
 "fork + vector + decisions" trinity for one stage, not with a green
 firmware build.
+
+---
+
+## 2026-04-27 — Phase 2 stage 4: usart0_init ported (with DMA RX)
+
+**Why:** Brief Phase 2 stage 4: `USART0_Init` + RX ISR + USART1_IRQ
+NVIC enable. The brief and the firmware actually use DMA Channel 1/2
+IRQ (not USART1 IRQ proper) because the RX path is DMA-driven, not
+register-polled. Renaming the it.c handler from
+`DMA_Channel1_2_IRQHandler` to libopencm3's `dma1_channel2_3_isr`
+happens in the it.c rename stage.
+
+**What I did:**
+
+1. **`Src/setup.c::usart0_init`** (formerly `USART0_Init`): every
+   peripheral, GPIO, USART, DMA and NVIC call inlined as direct
+   libopencm3 calls — no `pinModeAF` / `AF_USART0_TX` / `TARGET_DMA_*` /
+   `TARGET_nvic_irq_enable` / `dma_init_struct_usart` left.
+
+2. **Naming translation**: GD32 `USART0` ↔ libopencm3 `USART1` (same
+   APB2[14] peripheral, vendor-specific naming offset). GD `DMA_CH2`
+   ↔ libopencm3 `DMA1, DMA_CHANNEL3` (libopencm3 numbers DMA channels
+   from 1, GD from 0). GD `DMA_Channel1_2_IRQn` ↔ libopencm3
+   `NVIC_DMA_CHANNEL2_3_IRQ`. Documented inline.
+
+3. **DMA struct → individual setters**: SPL's
+   `dma_init_struct_usart.{direction,memory_addr,memory_inc,...}`
+   gather-then-init-once pattern replaced by libopencm3's
+   per-attribute setter calls (`dma_set_peripheral_address`,
+   `dma_set_memory_address`, `dma_set_number_of_data`,
+   `dma_set_read_from_peripheral`, `dma_disable_peripheral_increment_mode`,
+   `dma_enable_memory_increment_mode`, `dma_set_peripheral_size`,
+   `dma_set_memory_size`, `dma_set_priority`, `dma_enable_circular_mode`,
+   `dma_enable_transfer_complete_interrupt`, `dma_enable_channel`).
+   Sequence is identical; bit positions in DMA_CCR3 / DMA_CNDTR3 /
+   DMA_CPAR3 / DMA_CMAR3 are register-compatible per
+   `~/dev/regtrace/decisions/v0.2/DMA.md`.
+
+4. **NVIC priority encoding**: SPL `nvic_irq_enable(IRQn, 2, 0)` with
+   PRIGROUP_NOSUB → libopencm3 `nvic_set_priority(IRQn, 2 << 4) +
+   nvic_enable_irq(IRQn)`. The `<< 4` is because Cortex-M3 implements
+   only the upper 4 bits of the 8-bit priority byte. With clock_init's
+   `scb_set_priority_grouping(SCB_AIRCR_PRIGROUP_NOSUB)`, all 4 bits
+   pre-empt — so `2 << 4 = 0x20` reads back as pre-emption priority 2.
+
+5. **AF inlined**: USART0 TX/RX is `GPIO_AF0` if the pin is PB6/PB7
+   else `GPIO_AF1` (per GD32F130 datasheet 2.6.7). Inlined as a
+   ternary at the callsite. The active layout (defines_2-1-20.h) uses
+   PB6/PB7 → AF0, but the ternary keeps the code working for layouts
+   that put USART0 on PA9/PA10/PA14/PA15.
+
+6. **Oversampling**: SPL's `usart_oversample_config(USART0,
+   USART_OVSMOD_16)` was redundant — CR1.OVER8 is post-reset 0
+   (= 16x oversampling). Dropped; libopencm3 also defaults to 16x.
+
+7. **Vector verification**: `regtrace compare usart_init_115200_8n1`
+   for `gd-spl/gd32f1x0` ↔ `libopencm3/gd32f1x0` reports
+   "divergent (1 differences) — `libopencm3-only: W4 <USART1_BASE>+0x08
+   0x00000000`". CR3 explicit-clear from `usart_set_flow_control(NONE)`.
+   Decided-acceptable — CR3 final state is 0 in both;
+   `~/dev/regtrace/decisions/v0.2/USART.md` covers it.
+
+8. **`Src/main.c`, `Inc/setup.h`**: callsite + declaration renamed
+   `USART0_Init` → `usart0_init`.
+
+**Out of scope this stage**: `usart1_init` (the master/slave + steering
+USART) — same pattern but different DMA channel (CH4 → libopencm3
+DMA_CHANNEL5) and different NVIC IRQ (`NVIC_DMA_CHANNEL4_5_IRQ`).
+The `usart1_rx_buf` global stays. Same for `usart2_rx_buf` (TARGET=2
+only, F103, out of scope per brief).
+
+The `dma_init_struct_usart` global at the top of setup.c is still
+referenced by the unported USART1_Init; it goes when that stage
+lands. Same for `dma_init_struct_adc`.
 
 ---
 

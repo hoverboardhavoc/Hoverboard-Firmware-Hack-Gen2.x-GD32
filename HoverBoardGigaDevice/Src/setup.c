@@ -40,9 +40,13 @@
  * headers are added and the corresponding SPL #include chain is
  * removed file-wide. See decisions.md for the staging rationale. */
 #include <libopencm3/cm3/scb.h>
+#include <libopencm3/cm3/nvic.h>
 #include <libopencm3/gd32/f1x0/rcc.h>
 #include <libopencm3/gd32/f1x0/gpio.h>
 #include <libopencm3/gd32/f1x0/iwdg.h>
+#include <libopencm3/gd32/f1x0/usart.h>
+#include <libopencm3/gd32/f1x0/dma.h>
+#include <libopencm3/gd32/f1x0/nvic.h>
 
 #ifndef pinMode
 void pinMode(uint32_t pin, uint32_t mode)
@@ -817,95 +821,106 @@ void ADC_init(void)
 }
 
 
-void USART0_Init(uint32_t iBaud)
+//----------------------------------------------------------------------------
+// USART0 (= libopencm3 USART1) init
+//
+// Phase 2 stage 4 of the libopencm3 port. Inlined per brief guardrail #5 —
+// no AF_USART0_TX / TARGET_DMA_* / TARGET_nvic_irq_enable shims left.
+//
+// USART0 (GD vendor name) ↔ USART1 (libopencm3/STM32 name); same APB2[14]
+// peripheral. DMA channel mapping: GD DMA_CH2 (USART0 RX) ↔ libopencm3
+// DMA1_CHANNEL3 (numbering shifted by 1 — GD numbers from 0, libopencm3
+// from 1). The shared DMA controller sits at DMA1_BASE with seven channels;
+// channel 3 is the USART1_RX peripheral mapping per the F1x0 reference
+// manual table.
+//
+// AF map (GD32F130 datasheet 2.6.7): USART0 on PB6/PB7 = AF0; on
+// PA2/PA3/PA9/PA10/PA14/PA15 = AF1. The active layout's USART0_TX/RX
+// constants pick one of those pin pairs.
+//
+// USART config validated by regtrace vector usart/init_115200_8n1.yaml
+// (`final_state` mode, `gd-spl/gd32f1x0` ↔ `libopencm3/gd32f1x0` →
+// 1 difference: an explicit CR3=0 write that gd-spl skips). Decided-
+// acceptable per `~/dev/regtrace/decisions/v0.2/USART.md` — the final
+// CR3 state is 0 in both, libopencm3 just writes it explicitly via
+// usart_set_flow_control(NONE).
+//----------------------------------------------------------------------------
+void usart0_init(uint32_t iBaud)
 {
 #ifdef HAS_USART0
-	
-	#if TARGET == 2
 
-		rcu_periph_clock_enable(RCU_AF);        // Alternate Function clock
-		gpio_pin_remap_config(GPIO_USART0_REMAP, ENABLE); // JW: Remap USART0 to PB6 and PB7
-	
-		#if REMOTE_USART==0 && defined(REMOTE_UARTBUS)	// no pullup resistors with multiple boards on the UartBus - Esp32/Arduino (Serial.begin) have to setup pullups
-			#define USART0_PUPD	GPIO_MODE_AF_OD
-		#else
-			#define USART0_PUPD	GPIO_MODE_AF_PP
-		#endif
-		pinModeSpeed(USART0_TX, USART0_PUPD, GPIO_OSPEED_50MHZ);	// // GD32F130: GPIO_AF_1 = USART
-		pinModeSpeed(USART0_RX, GPIO_MODE_IN_FLOATING, GPIO_OSPEED_50MHZ);	
-	
+	// Pull config: open-drain on a multi-drop UART bus (REMOTE_UARTBUS)
+	// because external pull-ups are provided by the bus master; pull-up
+	// otherwise so the line idles HIGH between bytes.
+	#if REMOTE_USART==0 && defined(REMOTE_UARTBUS)
+		#define USART0_PUPD GPIO_PUPD_NONE
 	#else
-		#if REMOTE_USART==0 && defined(REMOTE_UARTBUS)	// no pullup resistors with multiple boards on the UartBus - Esp32/Arduino (Serial.begin) have to setup pullups
-			#define USART0_PUPD	GPIO_PUPD_NONE
-		#else
-			#define USART0_PUPD	GPIO_PUPD_PULLUP
-		#endif
-		pinModeAF(USART0_TX, AF_USART0_TX, USART0_PUPD,GPIO_OSPEED_50MHZ);	// // GD32F130: GPIO_AF_0 = USART, GPIO_AF_1 = I2C
-		pinModeAF(USART0_RX, AF_USART0_RX, USART0_PUPD,GPIO_OSPEED_50MHZ);	
-	
-	
+		#define USART0_PUPD GPIO_PUPD_PULLUP
 	#endif
 
-	// Enable ADC and DMA clock
-	rcu_periph_clock_enable(RCU_USART0);
-	rcu_periph_clock_enable(RCU_DMA); // target.h and target 2 = gd32f103: #define RCU_DMA RCU_DMA0 
+	// USART0 TX pin: AF mode, push-pull, 50 MHz, AF0 if PB6 else AF1.
+	gpio_mode_setup(USART0_TX & 0xffffff00U, GPIO_MODE_AF, USART0_PUPD,
+			1U << (USART0_TX & 0xfU));
+	gpio_set_output_options(USART0_TX & 0xffffff00U, GPIO_OTYPE_PP,
+			GPIO_OSPEED_HIGH, 1U << (USART0_TX & 0xfU));
+	gpio_set_af(USART0_TX & 0xffffff00U,
+			(USART0_TX == PB6) ? GPIO_AF0 : GPIO_AF1,
+			1U << (USART0_TX & 0xfU));
 
-	// Reset USART
-	usart_deinit(USART0); // JW: added
-	
-	// Init USART for USART0_BAUD baud, 8N1
-	usart_baudrate_set(USART0, iBaud);
-	usart_parity_config(USART0, USART_PM_NONE);
-	usart_word_length_set(USART0, USART_WL_8BIT);
-	usart_stop_bit_set(USART0, USART_STB_1BIT);
-	#if TARGET == 222	// robo: 2 NOT_NEEDED
-		usart_hardware_flow_rts_config(USART0, USART_RTS_DISABLE);  // JW: Disable RTS
-		usart_hardware_flow_cts_config(USART0, USART_CTS_DISABLE);  // JW: Disable CTS
-	#else
-		TARGET_usart_oversample_config(USART0, USART_OVSMOD_16);
-	#endif
+	// USART0 RX pin: AF mode, AF0 if PB7 else AF1.
+	gpio_mode_setup(USART0_RX & 0xffffff00U, GPIO_MODE_AF, USART0_PUPD,
+			1U << (USART0_RX & 0xfU));
+	gpio_set_output_options(USART0_RX & 0xffffff00U, GPIO_OTYPE_PP,
+			GPIO_OSPEED_HIGH, 1U << (USART0_RX & 0xfU));
+	gpio_set_af(USART0_RX & 0xffffff00U,
+			(USART0_RX == PB7) ? GPIO_AF0 : GPIO_AF1,
+			1U << (USART0_RX & 0xfU));
 
+	// Peripheral clocks — USART0 (= USART1 lp = APB2[14]) and DMA1 (= AHB[0]).
+	rcc_periph_clock_enable(RCC_USART1);
+	rcc_periph_clock_enable(RCC_DMA);
 
-	// Enable both transmitter and receiver
-	usart_transmit_config(USART0, USART_TRANSMIT_ENABLE);
-	usart_receive_config(USART0, USART_RECEIVE_ENABLE);
-	
-	// Enable USART
-	usart_enable(USART0);
+	// USART config — 8N1, no flow control, TX+RX. 16x oversampling left at
+	// post-reset default (CR1.OVER8 = 0). Baud divisor uses
+	// rcc_apb2_frequency, which clock_init's rcc_clock_setup_pll(HSI_72MHZ)
+	// already set to 72_000_000.
+	usart_disable(USART1);
+	usart_set_baudrate(USART1, iBaud);
+	usart_set_databits(USART1, 8);
+	usart_set_stopbits(USART1, USART_STOPBITS_1);
+	usart_set_parity(USART1, USART_PARITY_NONE);
+	usart_set_mode(USART1, USART_MODE_TX_RX);
+	usart_set_flow_control(USART1, USART_FLOWCONTROL_NONE);
+	usart_enable(USART1);
 
+	// NVIC: pre-emption priority 2 (the SPL nvic_irq_enable(IRQn, 2, 0)
+	// argument shape, given clock_init's PRIGROUP_NOSUB grouping uses all
+	// 4 implemented bits as pre-emption). Cortex-M3 implements only the
+	// upper 4 bits of the 8-bit priority byte → write priority=2<<4=0x20.
+	// Logical priority 2 cannot interrupt priority 0 (BLDC/hall) or 1
+	// (ADC/CalculateBldc), per the firmware's pre-empt hierarchy.
+	nvic_set_priority(NVIC_DMA_CHANNEL2_3_IRQ, 2 << 4);
+	nvic_enable_irq(NVIC_DMA_CHANNEL2_3_IRQ);
 
-	// Interrupt channel 1/2 enable
-	TARGET_nvic_irq_enable(TARGET_DMA_Channel1_2_IRQn, 2, 0);		// usart irqs can not interrupt 0=bldc/hall or 1=adc/CalculateBldc
+	// DMA channel 3 (GD CH2) for USART1 RX: peripheral-to-memory, 8-bit
+	// transfers, single-byte circular. The transfer-complete interrupt
+	// fires every byte → DMA_Channel1_2_IRQHandler in it.c → RemoteCallback
+	// or UpdateUSARTMasterSlaveInput.
+	dma_channel_reset(DMA1, DMA_CHANNEL3);
+	dma_set_peripheral_address(DMA1, DMA_CHANNEL3, (uint32_t)&USART_RDR(USART1));
+	dma_set_memory_address(DMA1, DMA_CHANNEL3, (uint32_t)usart0_rx_buf);
+	dma_set_number_of_data(DMA1, DMA_CHANNEL3, 1);
+	dma_set_read_from_peripheral(DMA1, DMA_CHANNEL3);
+	dma_disable_peripheral_increment_mode(DMA1, DMA_CHANNEL3);
+	dma_enable_memory_increment_mode(DMA1, DMA_CHANNEL3);
+	dma_set_peripheral_size(DMA1, DMA_CHANNEL3, DMA_CCR_PSIZE_8BIT);
+	dma_set_memory_size(DMA1, DMA_CHANNEL3, DMA_CCR_MSIZE_8BIT);
+	dma_set_priority(DMA1, DMA_CHANNEL3, DMA_CCR_PL_VERY_HIGH);
+	dma_enable_circular_mode(DMA1, DMA_CHANNEL3);
 
-
-	// Initialize DMA channel 2 for USART0 RX (CH4 for gd32f103)
-	TARGET_dma_deinit(TARGET_DMA_CH2);
-	dma_init_struct_usart.direction = DMA_PERIPHERAL_TO_MEMORY;
-	dma_init_struct_usart.memory_addr = (uint32_t)usart0_rx_buf;
-	dma_init_struct_usart.memory_inc = DMA_MEMORY_INCREASE_ENABLE;
-	dma_init_struct_usart.memory_width = DMA_MEMORY_WIDTH_8BIT;
-	dma_init_struct_usart.number = 1;
-	dma_init_struct_usart.periph_addr = USART0_DATA_RX_ADDRESS;	// 
-	dma_init_struct_usart.periph_inc = DMA_PERIPH_INCREASE_DISABLE;
-	dma_init_struct_usart.periph_width = DMA_PERIPHERAL_WIDTH_8BIT;
-	dma_init_struct_usart.priority = DMA_PRIORITY_ULTRA_HIGH;
-	TARGET_dma_init(TARGET_DMA_CH2, &dma_init_struct_usart);
-	
-	// Configure DMA mode
-	TARGET_dma_circulation_enable(TARGET_DMA_CH2);
-	TARGET_dma_memory_to_memory_disable(TARGET_DMA_CH2);
-
-	// USART DMA enable for transmission and receive
-	usart_dma_receive_config(USART0, USART_DENR_ENABLE);
-	
-	// Enable DMA transfer complete interrupt
-	TARGET_dma_interrupt_enable(TARGET_DMA_CH2, DMA_CHXCTL_FTFIE);
-	
-	// At least clear number of remaining data to be transferred by the DMA 
-	TARGET_dma_transfer_number_config(TARGET_DMA_CH2, 1);
-	
-	// Enable dma receive channel
-	TARGET_dma_channel_enable(TARGET_DMA_CH2);
+	usart_enable_rx_dma(USART1);
+	dma_enable_transfer_complete_interrupt(DMA1, DMA_CHANNEL3);
+	dma_enable_channel(DMA1, DMA_CHANNEL3);
 
 #endif
 }

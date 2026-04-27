@@ -50,7 +50,7 @@ void ADC_init(void);	// Initializes the ADC
 void ADC_Trigger_Timer_init(void);	// TIMER2 as slave of TIMER0, drives ADC trigger at a fixed offset past the PWM valley
 #endif
 
-void USART0_Init(uint32_t iBaud);
+void usart0_init(uint32_t iBaud);
 void USART1_Init(uint32_t iBaud);
 void USART2_Init(uint32_t iBaud);
 void USART_MasterSlave_init(void);	// Initializes the usart master slave
