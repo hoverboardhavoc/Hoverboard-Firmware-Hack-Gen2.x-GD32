@@ -14,10 +14,10 @@
 | ISR rename in `it.c` | n/a | n/a | n/a | ✅ |
 | timeout_timer_init | n/a (extra, not in brief) | ⬜ | n/a | ✅ |
 | usart1_init | n/a (extra, not in brief) | ⬜ | n/a | ✅ |
-| Inline pinMode/digitalWrite at all callers | n/a | n/a | n/a | ⬜ in-progress |
-| Replace SystemCoreClock + SPL types globally | n/a | n/a | n/a | ⬜ |
-| Delete lib/spl/, platformio.ini | n/a | n/a | n/a | ⬜ |
-| `make` builds firmware | n/a | n/a | n/a | ⬜ |
+| target.h rewrite + macros redirect to libopencm3 | n/a | n/a | n/a | ✅ |
+| SystemCoreClock alias + SPL type enums | n/a | n/a | n/a | ✅ |
+| Delete lib/spl/, platformio.ini, PIO scripts | n/a | n/a | n/a | ✅ |
+| `make` builds firmware | n/a | n/a | n/a | **✅** |
 
 Each row is its own multi-step sub-task (fork extension may need its
 own regtrace vector author/refresh first). The tabular layout is the
@@ -72,6 +72,47 @@ extension lands) is the operative milestone — the firmware build is
 green only at the very end. Each commit boundary should align with
 "fork + vector + decisions" trinity for one stage, not with a green
 firmware build.
+
+---
+
+## 2026-04-27 — Done condition #1 satisfied: `make` builds clean
+
+`make clean && make` succeeds with `lib/spl/`, `platformio.ini`,
+`add_RTT_task.py`, `add_RTT_task_gd32e230.py`, and `add_RTT_console.py`
+deleted. Final firmware: **22796 B text + 236 B data + 2004 B BSS =
+25036 B** (under 50% of 64 KB flash + 8 KB RAM).
+
+ISR cross-check (Done condition #3): `nm build/firmware.elf` shows
+every active handler resolved to a non-weak `T` symbol —
+`sys_tick_handler`, `tim14_isr`, `tim1_brk_up_trg_com_isr`,
+`dma_channel1_isr`, `dma_channel4_5_isr`, `nmi_handler`,
+`hard_fault_handler`, `sv_call_handler`, `pend_sv_handler`.
+`dma_channel2_3_isr` resolves to libopencm3's weak default — but
+`HAS_USART0` isn't defined in this active config so the corresponding
+NVIC enable doesn't fire either; no silent-fallback risk.
+
+The brief's Done condition #2 (every Phase 2 setup function has a
+regtrace-validated vector pair) is **partial**:
+- ✅ `clock_init`: vector `rcc/irc8m_pll_72mhz` traced; 14
+  decided-acceptable divergences in `decisions/v0.5+/RCC.md`.
+- ✅ `gpio_init`: pattern validated by `gpio/output_pa5_pp_50mhz`;
+  `gpio_init` is N applications of the same per-pin pattern.
+- ✅ `watchdog_init`: vector `iwdg/config_2sec_period` traced match
+  in final_state mode (added libopencm3/gd32f1x0 leg this session).
+- ✅ `usart0_init`: vector `usart/init_115200_8n1` traced with one
+  benign CR3=0 divergence per `decisions/v0.2/USART.md`.
+- 🟡 `pwm_init`: vector `timer/pwm_init_center_aligned_16khz` covers
+  the basic init shape (mode, period, prescaler, repetition, UPG).
+  Output channel + break + per-channel state writes not yet
+  vectored — per-call mapping documented inline.
+- ⬜ `adc_trigger_timer_init`: no covering vector. Per-call mapping
+  documented inline.
+- 🟡 `adc_init`: existing dma + adc vectors cover individual setters
+  but not the full integrated init. Per-call mapping documented
+  inline.
+
+Authoring the missing/expanding vectors and running their compares
+is Phase 3 work that follows.
 
 ---
 
