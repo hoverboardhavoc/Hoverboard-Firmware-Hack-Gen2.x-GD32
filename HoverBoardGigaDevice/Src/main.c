@@ -106,7 +106,14 @@ int main (void)
 	ConfigRead();		// reads oConfig defined in defines.h from flash
 	
 	clock_init();		// 72 MHz IRC8M PLL via libopencm3 rcc_clock_setup_pll(HSI_72MHZ); also folds in NVIC priority grouping (was Interrupt_init).
-	SysTick_Config(SystemCoreClock / 1000);	//  Configure SysTick to generate an interrupt every millisecond
+	/* Configure SysTick to generate an interrupt every millisecond. Was
+	 * CMSIS SysTick_Config(SystemCoreClock / 1000) — replaced with
+	 * libopencm3 systick_* primitives. */
+	systick_set_reload((SystemCoreClock / 1000) - 1);
+	systick_set_clocksource(STK_CSR_CLKSOURCE_AHB);
+	systick_clear();
+	systick_counter_enable();
+	systick_interrupt_enable();
 	//Clock_test();		// 72Mhz: iTestClock=12000, 64Mhz=13500, 48Mhz=18000 = 18 seconds fron power on to startup melody. 124Mhz = 7000
 						// PlatformIO binary: 72 Mhz=11000=11seconds, 64MHz=12380, 124Mhz=6388=6.4s . Better assembler code ?
 		
@@ -194,13 +201,13 @@ int main (void)
 	timer_channel_output_pulse_value_config(TIMER_BLDC, TIMER_BLDC_CHANNEL_B, BLDC_TIMER_MID_VALUE);
 	timer_channel_output_pulse_value_config(TIMER_BLDC, TIMER_BLDC_CHANNEL_Y, 0);
 	uint32_t iTimeWait = millis() + 500;
-	while (millis()<iTimeWait){	fwdgt_counter_reload();};
+	while (millis()<iTimeWait){	iwdg_reset();};
 */
 	
 	// Device has 1,6 seconds to do all the initialization
 	// afterwards watchdog will be fired
 	//while(1)
-	fwdgt_counter_reload();
+	iwdg_reset();
 
 #ifdef REMOTE_AUTODETECT
   while(1)
@@ -222,7 +229,7 @@ int main (void)
 		#endif
 
 		// Reload watchdog (watchdog fires after 1,6 seconds)
-		fwdgt_counter_reload();
+		iwdg_reset();
 	}
 }
 
@@ -236,7 +243,7 @@ int main (void)
 		uint32_t iTimePushed = millis();
 		while (BUTTON_PUSHED == digitalRead(BUTTON))
 		{
-			fwdgt_counter_reload();	// Reload watchdog while button is pressed
+			iwdg_reset();	// Reload watchdog while button is pressed
 			#ifdef REMOTE_ADC
 				if (millis()-iTimePushed > 2000)
 				{
@@ -397,8 +404,8 @@ iBug = 10;
 				if (BUTTON_PUSHED == digitalRead(BUTTON))
 				//if (gpio_input_bit_get(BUTTON_PORT, BUTTON_PIN))
 				{
-					while (BUTTON_PUSHED == digitalRead(BUTTON)) {fwdgt_counter_reload();}
-					//while (gpio_input_bit_get(BUTTON_PORT, BUTTON_PIN)) {fwdgt_counter_reload();}
+					while (BUTTON_PUSHED == digitalRead(BUTTON)) {iwdg_reset();}
+					//while (gpio_input_bit_get(BUTTON_PORT, BUTTON_PIN)) {iwdg_reset();}
 					ShutOff();
 				}
 			#endif
@@ -474,7 +481,7 @@ iBug = 10;
 
 		//Delay(DELAY_IN_MAIN_LOOP);
 
-		fwdgt_counter_reload(); // Reload watchdog until device is off
+		iwdg_reset(); // Reload watchdog until device is off
   }
 }
 
@@ -519,7 +526,7 @@ int32_t ShutOff(void)
 	#ifdef SELF_HOLD
 		digitalWrite(SELF_HOLD,RESET);
 	#endif
-	while(1)	fwdgt_counter_reload(); // Reload watchdog until device is off
+	while(1)	iwdg_reset(); // Reload watchdog until device is off
 }
 
 

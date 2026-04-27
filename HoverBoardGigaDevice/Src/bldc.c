@@ -217,13 +217,13 @@ void CalculateBLDC(void)
 		SetFilter(14);	// soft brake	old: FILTER_SHIFT + 2
 		if (ABS(bldc_outputFilterPwm)<100)
 		{
-			timer_automatic_output_disable(TIMER_BLDC);		
+			timer_disable_break_automatic_output(TIMER_BLDC);		
 		}
 		//DEBUG_LedSet((steerCounter%20) > 10,2);	// macro. iCol: 0=green, 1=organge, 2=red
   	}
 	else
 	{
-		timer_automatic_output_enable(TIMER_BLDC);
+		timer_enable_break_automatic_output(TIMER_BLDC);
 		SetFilter(iFILTER_SHIFTDo);	// FILTER_SHIFT
 		iDrivingModeOverride = iDrivingMode;
 		//DEBUG_LedSet(hall_c == 0,0)
@@ -275,7 +275,7 @@ void CalculateBLDC(void)
 	if (pos == 0) 	// 0b000 and 0b111 should never happen with the three hall sensors
 	{
 			// Invalid position - disable PWM
-			timer_automatic_output_disable(TIMER_BLDC);
+			timer_disable_break_automatic_output(TIMER_BLDC);
 			//DEBUG_LedSet(SET,2);	// macro. iCol: 0=green, 1=organge, 2=red
 			return;
 	}
@@ -294,9 +294,9 @@ void CalculateBLDC(void)
 	bldc_get_pwm(bldc_outputFilterPwm, pos, &y, &b, &g);
 
 	// Set PWM output (pwm_res/2 is the mean value, setvalue has to be between 10 and pwm_res-10)
-	timer_channel_output_pulse_value_config(TIMER_BLDC, TIMER_BLDC_CHANNEL_G, CLAMP(g + BLDC_TIMER_MID_VALUE, BLDC_TIMER_MIN_VALUE, BLDC_TIMER_MAX_VALUE));
-	timer_channel_output_pulse_value_config(TIMER_BLDC, TIMER_BLDC_CHANNEL_B, CLAMP(b + BLDC_TIMER_MID_VALUE, BLDC_TIMER_MIN_VALUE, BLDC_TIMER_MAX_VALUE));
-	timer_channel_output_pulse_value_config(TIMER_BLDC, TIMER_BLDC_CHANNEL_Y, CLAMP(y + BLDC_TIMER_MID_VALUE, BLDC_TIMER_MIN_VALUE, BLDC_TIMER_MAX_VALUE));
+	timer_set_oc_value(TIMER_BLDC,  TIMER_BLDC_CHANNEL_G,  CLAMP(g + BLDC_TIMER_MID_VALUE, BLDC_TIMER_MIN_VALUE, BLDC_TIMER_MAX_VALUE));
+	timer_set_oc_value(TIMER_BLDC,  TIMER_BLDC_CHANNEL_B,  CLAMP(b + BLDC_TIMER_MID_VALUE, BLDC_TIMER_MIN_VALUE, BLDC_TIMER_MAX_VALUE));
+	timer_set_oc_value(TIMER_BLDC,  TIMER_BLDC_CHANNEL_Y,  CLAMP(y + BLDC_TIMER_MID_VALUE, BLDC_TIMER_MIN_VALUE, BLDC_TIMER_MAX_VALUE));
 
 	// robo23
 	iOdom = iOdom - up_or_down(lastPos, pos); // int32 will overflow at +-2.147.483.648

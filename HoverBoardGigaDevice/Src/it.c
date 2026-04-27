@@ -285,7 +285,7 @@ void Delay (uint32_t dlyTicks)
   curTicks = msTicks;
   while ((msTicks - curTicks) < dlyTicks)
 	{
-		__NOP();
+		__asm__ volatile("nop");  // CMSIS __NOP() → bare inline asm
 	}
 }
 

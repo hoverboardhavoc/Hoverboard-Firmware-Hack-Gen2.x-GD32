@@ -9,4 +9,7 @@
 // All FOC internals (PLL, Clarke/Park, PI, SVPWM, sine table) are
 // file-local statics in bldcFOC.c — nothing else leaks into the API.
 
+// Main-loop RTT log emitter; called from main.c when BLDC_FOC + RTT_REMOTE.
+void RttMainPoll(void);
+
 #endif // BLDCFOC_H

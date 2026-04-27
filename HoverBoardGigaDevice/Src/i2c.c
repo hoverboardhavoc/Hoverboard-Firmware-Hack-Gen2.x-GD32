@@ -26,57 +26,51 @@
 
 #ifdef I2C_ENABLE
 
-//#define I2C_OLD
-#ifdef I2C_OLD
-void I2C_Init() {
-    /* I2C clock configure */
-     i2c_clock_config(I2C_PERIPH, I2C_SPEED, I2C_DTCY_16_9);            // I2C duty cycle in fast mode plus
-    /* I2C address configure */
-    i2c_mode_addr_config(I2C_PERIPH, I2C_I2CMODE_ENABLE, I2C_ADDFORMAT_7BITS, I2C_OWN_ADDRESS7);
-    /* enable I2C */
-    i2c_enable(I2C_PERIPH);
-    /* enable acknowledge */
-    i2c_ack_config(I2C_PERIPH, I2C_ACK_ENABLE);
-}
-#else
-void I2C_Init()
+/* GD I2C0 = libopencm3 I2C1 (APB1[21]). 100 kHz standard-mode I2C on
+ * PB6/PB7 (or PB8/PB9 if I2C_PB8PB9 selected) with AF1, open-drain,
+ * pull-up enabled. */
+void I2C_Init(void)
 {
-    rcu_periph_clock_enable(RCU_GPIOB);
-    rcu_periph_clock_enable(MPU_RCU_I2C);
+	rcc_periph_clock_enable(RCC_GPIOB);
+	rcc_periph_clock_enable(MPU_RCU_I2C);
 
-	#ifdef I2C_PB6PB7	
-		// Configure PB6 (SCL) and PB7 (SDA) as AF open-drain
-		gpio_mode_set(GPIOB, GPIO_MODE_AF, GPIO_PUPD_PULLUP, GPIO_PIN_6 | GPIO_PIN_7);
-		gpio_output_options_set(GPIOB, GPIO_OTYPE_OD, GPIO_OSPEED_50MHZ, GPIO_PIN_6 | GPIO_PIN_7);
-		gpio_af_set(GPIOB, GPIO_AF_1, GPIO_PIN_6 | GPIO_PIN_7);  // AF1 for I2C0
+	#ifdef I2C_PB6PB7
+		gpio_mode_setup(GPIOB, GPIO_MODE_AF, GPIO_PUPD_PULLUP, GPIO6 | GPIO7);
+		gpio_set_output_options(GPIOB, GPIO_OTYPE_OD, GPIO_OSPEED_HIGH, GPIO6 | GPIO7);
+		gpio_set_af(GPIOB, GPIO_AF1, GPIO6 | GPIO7);
 	#else
-		// Configure PB8 (SCL) and PB9 (SDA) as AF open-drain
-	  #if TARGET == 2 // GD32/STM32F103
-		rcu_periph_clock_enable(RCU_AF);        // Alternate Function clock
-		gpio_pin_remap_config(GPIO_I2C0_REMAP, ENABLE); // JW: Remap I2C0 to PB8 and PB9
-		gpio_init(GPIOB, GPIO_MODE_AF_OD, GPIO_OSPEED_50MHZ, GPIO_PIN_8 | GPIO_PIN_9);
-	  #else
-		gpio_mode_set(GPIOB, GPIO_MODE_AF, GPIO_PUPD_PULLUP, GPIO_PIN_8 | GPIO_PIN_9);
-		gpio_output_options_set(GPIOB, GPIO_OTYPE_OD, GPIO_OSPEED_50MHZ, GPIO_PIN_8 | GPIO_PIN_9);
-		gpio_af_set(GPIOB, GPIO_AF_1, GPIO_PIN_8 | GPIO_PIN_9);  // AF1 for I2C0
-	  #endif
-	#endif	
-	
-	i2c_deinit(I2C_PERIPH);
-	i2c_clock_config(I2C_PERIPH, I2C_SPEED, I2C_DTCY_16_9);            // I2C duty cycle in fast mode plus
-	i2c_mode_addr_config(I2C_PERIPH, I2C_I2CMODE_ENABLE, I2C_ADDFORMAT_7BITS, I2C_OWN_ADDRESS7);
-	i2c_enable(I2C_PERIPH);
-	i2c_ack_config(I2C_PERIPH, I2C_ACK_ENABLE);
+		gpio_mode_setup(GPIOB, GPIO_MODE_AF, GPIO_PUPD_PULLUP, GPIO8 | GPIO9);
+		gpio_set_output_options(GPIOB, GPIO_OTYPE_OD, GPIO_OSPEED_HIGH, GPIO8 | GPIO9);
+		gpio_set_af(GPIOB, GPIO_AF1, GPIO8 | GPIO9);
+	#endif
+
+	/* Software-reset the peripheral via the RCC reset pulse, then disable
+	 * the peripheral so subsequent CCR/TRISE/FREQ writes take effect
+	 * (those registers are write-only when CR1.PE=0). */
+	rcc_periph_reset_pulse(RST_I2C1);
+	i2c_peripheral_disable(I2C1);
+
+	/* APB1 = 36 MHz post-clock_init. Set FREQ field, then CCR for 100 kHz
+	 * standard-mode (Tlow = Thigh = 5 µs → CCR = 5e-6 / (1/36e6) = 180),
+	 * then TRISE = (FREQ + 1) for SM. */
+	i2c_set_clock_frequency(I2C1, 36);
+	i2c_set_ccr(I2C1, 180);
+	i2c_set_trise(I2C1, 37);
+	i2c_set_own_7bit_slave_address(I2C1, I2C_OWN_ADDRESS7);
+
+	i2c_peripheral_enable(I2C1);
+	i2c_enable_ack(I2C1);
 }
-#endif
 
-void i2c_hardReset(uint32_t i2c_periph) {
-	// 1. Force the I2C peripheral into reset state
-	i2c_software_reset_config(i2c_periph, I2C_SRESET_SET);
-	for(volatile int d=0; d<1000; d++);
-	i2c_software_reset_config(i2c_periph, I2C_SRESET_RESET);
-
-	// 2. Re-initialize the I2C peripheral from scratch
+void i2c_hardReset(uint32_t i2c_periph)
+{
+	/* I2C_CR1.SWRST=1 holds the peripheral in reset (clears all
+	 * SR1/SR2/CR1/CR2 fields except SWRST itself), SWRST=0 releases.
+	 * Same effect as the SPL i2c_software_reset_config(SET/RESET) pair.
+	 * Followed by I2C_Init to reload the peripheral config. */
+	I2C_CR1(i2c_periph) |= I2C_CR1_SWRST;
+	for (volatile int d = 0; d < 1000; d++);
+	I2C_CR1(i2c_periph) &= ~I2C_CR1_SWRST;
 	I2C_Init();
 }
 
@@ -93,47 +87,47 @@ int8_t i2c_writeBytes(
     uint32_t tmo = 0;
 
     // 1) wait for bus idle
-    while (i2c_flag_get(i2c_periph, I2C_FLAG_I2CBSY)) {
+    while ((I2C_SR2(i2c_periph) & I2C_SR2_BUSY)) {
         if (++tmo > I2C_TIMEOUT) return I2C_ERR;
     }
 
     // 2) send START
-    i2c_start_on_bus(i2c_periph);
+    i2c_send_start(i2c_periph);
     tmo = 0;
-    while (!i2c_flag_get(i2c_periph, I2C_FLAG_SBSEND)) {
+    while (!(I2C_SR1(i2c_periph) & I2C_SR1_SB)) {
         if (++tmo > I2C_TIMEOUT) return I2C_ERR;
     }
 
     // 3) send slave address + write bit
     //     — GD32 uses I2C_TRANSMITTER / I2C_RECEIVER
-    i2c_master_addressing(i2c_periph, devAddr << 1, I2C_TRANSMITTER);
+    i2c_send_7bit_address(i2c_periph, devAddr, I2C_WRITE);
     tmo = 0;
-    while (!i2c_flag_get(i2c_periph, I2C_FLAG_ADDSEND)) {
+    while (!(I2C_SR1(i2c_periph) & I2C_SR1_ADDR)) {
         if (++tmo > I2C_TIMEOUT) {
-            i2c_stop_on_bus(i2c_periph);
+            i2c_send_stop(i2c_periph);
             return I2C_ERR;
         }
     }
     // clear the address‐sent flag
-    i2c_flag_clear(i2c_periph, I2C_FLAG_ADDSEND);
+    (void)I2C_SR1(i2c_periph); (void)I2C_SR2(i2c_periph);
 
     // 4) send register address
-    i2c_data_transmit(i2c_periph, regAddr);
+    i2c_send_data(i2c_periph, regAddr);
     tmo = 0;
-    while (!i2c_flag_get(i2c_periph, I2C_FLAG_TBE)) {
+    while (!(I2C_SR1(i2c_periph) & I2C_SR1_TxE)) {
         if (++tmo > I2C_TIMEOUT) {
-            i2c_stop_on_bus(i2c_periph);
+            i2c_send_stop(i2c_periph);
             return I2C_ERR;
         }
     }
 
     // 5) send payload bytes
     for (uint8_t i = 0; i < length; i++) {
-        i2c_data_transmit(i2c_periph, data[i]);
+        i2c_send_data(i2c_periph, data[i]);
         tmo = 0;
-        while (!i2c_flag_get(i2c_periph, I2C_FLAG_TBE)) {
+        while (!(I2C_SR1(i2c_periph) & I2C_SR1_TxE)) {
             if (++tmo > I2C_TIMEOUT) {
-                i2c_stop_on_bus(i2c_periph);
+                i2c_send_stop(i2c_periph);
                 return I2C_ERR;
             }
         }
@@ -141,13 +135,13 @@ int8_t i2c_writeBytes(
 
     // 6) wait for transfer complete, then STOP
     tmo = 0;
-    while (!i2c_flag_get(i2c_periph, I2C_FLAG_BTC)) {
+    while (!(I2C_SR1(i2c_periph) & I2C_SR1_BTF)) {
         if (++tmo > I2C_TIMEOUT) {
-            i2c_stop_on_bus(i2c_periph);
+            i2c_send_stop(i2c_periph);
             return I2C_ERR;
         }
     }
-    i2c_stop_on_bus(i2c_periph);
+    i2c_send_stop(i2c_periph);
 
     return I2C_OK;
 }
@@ -209,70 +203,70 @@ int8_t i2c_readBytes(uint32_t i2c_periph,
     uint32_t tmo = 0;
 
     // 1) wait for bus idle
-    while (i2c_flag_get(i2c_periph, I2C_FLAG_I2CBSY)) {
+    while ((I2C_SR2(i2c_periph) & I2C_SR2_BUSY)) {
         if (++tmo > I2C_TIMEOUT) return I2C_ERR;
     }
 
     // 2) send START + slave addr (write) + regAddr
-    i2c_start_on_bus(i2c_periph);
+    i2c_send_start(i2c_periph);
     tmo = 0;
-    while (!i2c_flag_get(i2c_periph, I2C_FLAG_SBSEND)) {
+    while (!(I2C_SR1(i2c_periph) & I2C_SR1_SB)) {
         if (++tmo > I2C_TIMEOUT) return I2C_ERR;
     }
 
-    i2c_master_addressing(i2c_periph, devAddr << 1, I2C_TRANSMITTER);
+    i2c_send_7bit_address(i2c_periph, devAddr, I2C_WRITE);
     tmo = 0;
-    while (!i2c_flag_get(i2c_periph, I2C_FLAG_ADDSEND)) {
+    while (!(I2C_SR1(i2c_periph) & I2C_SR1_ADDR)) {
         if (++tmo > I2C_TIMEOUT) {
-            i2c_stop_on_bus(i2c_periph);
+            i2c_send_stop(i2c_periph);
             i2cReadAddrErrors++;
             return I2C_ERR;
         }
     }
-    i2c_flag_clear(i2c_periph, I2C_FLAG_ADDSEND);
+    (void)I2C_SR1(i2c_periph); (void)I2C_SR2(i2c_periph);
 
-    i2c_data_transmit(i2c_periph, regAddr);
+    i2c_send_data(i2c_periph, regAddr);
     tmo = 0;
-    while (!i2c_flag_get(i2c_periph, I2C_FLAG_TBE)) {
+    while (!(I2C_SR1(i2c_periph) & I2C_SR1_TxE)) {
         if (++tmo > I2C_TIMEOUT) {
-            i2c_stop_on_bus(i2c_periph);
+            i2c_send_stop(i2c_periph);
             return I2C_ERR;
         }
     }
 
     // 3) repeated-start for read
-    i2c_start_on_bus(i2c_periph);
+    i2c_send_start(i2c_periph);
     tmo = 0;
-    while (!i2c_flag_get(i2c_periph, I2C_FLAG_SBSEND)) {
+    while (!(I2C_SR1(i2c_periph) & I2C_SR1_SB)) {
         if (++tmo > I2C_TIMEOUT) return I2C_ERR;
     }
 
-    i2c_master_addressing(i2c_periph, devAddr << 1, I2C_RECEIVER);
+    i2c_send_7bit_address(i2c_periph, devAddr, I2C_READ);
     tmo = 0;
-    while (!i2c_flag_get(i2c_periph, I2C_FLAG_ADDSEND)) {
+    while (!(I2C_SR1(i2c_periph) & I2C_SR1_ADDR)) {
         if (++tmo > I2C_TIMEOUT) {
-            i2c_stop_on_bus(i2c_periph);
+            i2c_send_stop(i2c_periph);
             return I2C_ERR;
         }
     }
-    i2c_flag_clear(i2c_periph, I2C_FLAG_ADDSEND);
+    (void)I2C_SR1(i2c_periph); (void)I2C_SR2(i2c_periph);
 
     // 4) read each byte
     for (uint8_t i = 0; i < length; i++) {
         // on last byte, disable ACK and send STOP
         if (i == length - 1) {
-            i2c_ack_config(i2c_periph, I2C_ACK_DISABLE);
-            i2c_stop_on_bus(i2c_periph);
+            i2c_disable_ack(i2c_periph);
+            i2c_send_stop(i2c_periph);
         }
         tmo = 0;
-        while (!i2c_flag_get(i2c_periph, I2C_FLAG_RBNE)) {
+        while (!(I2C_SR1(i2c_periph) & I2C_SR1_RxNE)) {
             if (++tmo > I2C_TIMEOUT) return I2C_ERR;
         }
-        data[i] = i2c_data_receive(i2c_periph);
+        data[i] = i2c_get_data(i2c_periph);
     }
 
     // re-enable ACK for next time
-    i2c_ack_config(i2c_periph, I2C_ACK_ENABLE);
+    i2c_enable_ack(i2c_periph);
 
     return I2C_OK;
 }

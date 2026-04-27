@@ -67,27 +67,15 @@ void pinModePull(uint32_t pin, uint32_t mode, uint32_t pull)
 
 #define TIMEOUT_FREQ  1000
 
-// timeout timer parameter structs
-timer_parameter_struct timeoutTimer_paramter_struct;
-
-// PWM timer Parameter structs
-timer_parameter_struct timerBldc_paramter_struct;	
-timer_break_parameter_struct timerBldc_break_parameter_struct;
-timer_oc_parameter_struct timerBldc_oc_parameter_struct;
-
-// DMA (USART) structs
-dma_parameter_struct dma_init_struct_usart;
-
-//uint8_t usartMasterSlave_rx_buf[USART_MASTERSLAVE_RX_BUFFERSIZE];
-//uint8_t usartSteer_COM_rx_buf[USART_STEER_COM_RX_BUFFERSIZE];
+/* SPL gather-then-init parameter structs (timer_parameter_struct,
+ * timer_break_parameter_struct, timer_oc_parameter_struct,
+ * dma_parameter_struct) used to live here. Removed during the
+ * libopencm3 port — every init function now uses per-attribute setters
+ * directly per guardrail #5, so the structs are dead weight. */
 
 uint8_t usart0_rx_buf[1];
 uint8_t usart1_rx_buf[1];
-uint8_t usart2_rx_buf[1];
 
-
-// DMA (ADC) structs
-dma_parameter_struct dma_init_struct_adc;
 extern adc_buf_t adc_buffer;
 
 /* Interrupt_init removed: the only thing it did — set NVIC priority
@@ -768,7 +756,7 @@ void ADC_initOld(void)
 //----------------------------------------------------------------------------
 void adc_init(void)
 {
-	rcc_periph_clock_enable(RCC_ADC1);
+	rcc_periph_clock_enable(RCC_ADC);
 	rcc_periph_clock_enable(RCC_DMA);
 
 	// ADC clock = APB2 / 6 = 72 MHz / 6 = 12 MHz. Above 14 MHz is out of
@@ -1130,34 +1118,35 @@ static uint32_t get_page_size(uint32_t flash_size)
 	return (flash_size <= 65536) ? 1024 : 2048; // JW: 1KB page for <=64KB, 2KB for >64KB
 }
 
-void flashErase(uint32_t address) // Clears a page of microprocessor memory. JW: Requires page erase before write (bits can only be changed from 1 to 0).
+/* Flash helpers — SPL fmc_* → libopencm3 flash_*. The fork's
+ * gd32/f1x0/flash.h forwards to stm32/f1/flash.h which in turn pulls
+ * in flash_common_f01.h (page-erase + word/half-word program +
+ * status-flag bitfields). FMC and STM32F1 FLASH controllers are
+ * register-compatible per regtrace decisions/v0.5+/FLASH.md. */
+void flashErase(uint32_t address) // Page erase: bits can only flip 1→0 without an erase first.
 {
-	fmc_unlock();
-	fmc_flag_clear(FMC_FLAG_END | FMC_FLAG_WPERR);
-	fmc_page_erase(address);
-	fmc_lock();
+	flash_unlock();
+	flash_clear_status_flags();
+	flash_erase_page(address);
+	flash_lock();
 }
 uint32_t flashRead(uint32_t address) // Reads 4 bytes from microprocessor memory
 {
 	return *(uint32_t*)address;
 }
-uint8_t flashWrite(uint32_t address, uint32_t data)	// Writes 4 bytes to microprocessor memory
+uint8_t flashWrite(uint32_t address, uint32_t data) // Writes 4 bytes to microprocessor memory
 {
 	uint8_t fflash = FALSE;
-	fmc_unlock();
-	fmc_flag_clear(FMC_FLAG_END | FMC_FLAG_WPERR);
+	flash_unlock();
+	flash_clear_status_flags();
 
-	
+	flash_program_word(address, data);
+	flash_wait_for_last_operation();
+	if (!(flash_get_status_flags() & FLASH_SR_WRPRTERR)) {
+		fflash = TRUE;
+	}
 
-	#if TARGET == 2
-		if (fmc_halfword_program(address, (uint16_t) data)== FMC_READY) 	// JW: STM32F103 can only write 16 bits at a time.
-		{ 
-			if (fmc_halfword_program((address+2), (uint16_t) (data>>16))== FMC_READY) fflash = TRUE;
-		}
-	#else
-		if (fmc_word_program(address, data) == FMC_READY) fflash = TRUE; 
-	#endif
-	fmc_lock();
+	flash_lock();
 	return fflash;
 }
 void flashWriteBuffer(uint32_t address, uint8_t *pbuffer, uint16_t len) 	// Write buffer (word-aligned) by Deepseek
@@ -1254,7 +1243,9 @@ void clock_init(void)
 	 * gd-spl's NVIC_PRIGROUP_PRE4_SUB0. Runs before any peripheral's
 	 * own NVIC enable so each subsequent nvic_enable_irq sees the right
 	 * grouping. */
-	scb_set_priority_grouping(SCB_AIRCR_PRIGROUP_NOSUB);
+	/* GROUP16_NOSUB = 4 pre-emption bits, 0 sub-priority bits = SPL
+	 * NVIC_PRIGROUP_PRE4_SUB0 (all 4 implemented bits go to pre-empt). */
+	scb_set_priority_grouping(SCB_AIRCR_PRIGROUP_GROUP16_NOSUB);
 
 	/* Diagnostic: PLLMF[4:0]. After rcc_clock_setup_pll(...HSI_72MHZ) this
 	 * should read 0x11 (PLLMF[4]=1, PLLMF[3:0]=1 → MUL18). Cross-check

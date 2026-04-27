@@ -3,6 +3,10 @@
 
 // ----------- #include framework begin ------------------------------
 
+/* target.h pulls in all libopencm3 peripheral headers + the
+ * FlagStatus/ErrStatus types + the SystemCoreClock alias. Keeping that
+ * set in target.h means files that only include target.h directly (e.g.
+ * comms.c) get the full HAL surface. */
 #include "../Inc/target.h"
 #include "../Inc/configSelect.h"
 
@@ -92,19 +96,20 @@
 #define BLDC_TIMER_PERIOD       (SystemCoreClock  / 2u / PWM_FREQ) // = 2250 for 16 kHz and 3000 for 12 kHz ; SystemCoreClock = 72000000u = 
 //#define BLDC_TIMER_PERIOD      (SystemCoreClock / PWM_FREQ - 1)		// Gemini testing alignedmode = TIMER_COUNTER_UP
 
-#ifndef TIMER_BLDC	// these defines should be equal for all Gen2 boards as they only have on bldc capable TIMER = TIMER0
-	#define TIMER_BLDC 		TIMER0
-	#define RCU_TIMER_BLDC 		RCU_TIMER0
-	#define TIMER_BLDC_CHANNEL_G 	TIMER_CH_2
-	#define TIMER_BLDC_CHANNEL_B 	TIMER_CH_1
-	#define TIMER_BLDC_CHANNEL_Y 	TIMER_CH_0
+/* TIMER_BLDC / TIMER_TIMEOUT — libopencm3 spelling for the GD32F130's
+ * TIMER0 (advanced) and TIMER13 (basic). Channel offsets correspond to
+ * the board-specific wiring of the BLDC bridge (G/B/Y phases routed
+ * through TIM1's OC3/OC2/OC1). The off-by-one between GD's TIMER_CH_n
+ * and libopencm3's TIM_OCn is folded in here. */
+#ifndef TIMER_BLDC
+	#define TIMER_BLDC               TIM1
+	#define TIMER_BLDC_CHANNEL_G     TIM_OC3   /* GD CH_2 → libopencm3 OC3 */
+	#define TIMER_BLDC_CHANNEL_B     TIM_OC2   /* GD CH_1 → libopencm3 OC2 */
+	#define TIMER_BLDC_CHANNEL_Y     TIM_OC1   /* GD CH_0 → libopencm3 OC1 */
 #endif
 
 #ifndef TIMER_TIMEOUT
-	#define TIMER_TIMEOUT TIMER13
-	#define TIMEOUT_IrqHandler TIMER13_IRQHandler
-	#define RCU_TIMER_TIMEOUT	RCU_TIMER13
-	#define TIMER_TIMEOUT_IRQn TIMER13_IRQn
+	#define TIMER_TIMEOUT            TIM14     /* GD TIMER13 = libopencm3 TIM14 */
 #endif
 
 
