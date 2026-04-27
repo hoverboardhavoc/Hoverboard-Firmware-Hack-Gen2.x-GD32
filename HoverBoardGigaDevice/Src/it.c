@@ -135,7 +135,7 @@ void TARGET_TIMER0_BRK_UP_TRG_COM_IRQHandler(void)
 	{
 		// ADC trigger is now hardware-driven via TIMER2 TRGO → T2_TRGO
 		// on the regular group (see setup.c::ADC_Trigger_Timer_init and
-		// ADC_init). When phase-current sensing isn't compiled in, the
+		// adc_init). When phase-current sensing isn't compiled in, the
 		// regular group falls back to software trigger and we fire it
 		// here.
 		#if !(defined(PHASE_CURRENT_A) && defined(PHASE_CURRENT_B))

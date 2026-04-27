@@ -170,7 +170,7 @@ int main (void)
 	#endif
 
 	// Init ADC
-	ADC_init();
+	adc_init();
 
 	#if defined(PHASE_CURRENT_A) && defined(PHASE_CURRENT_B)
 		// TIMER2 hardware-triggers the ADC from TIMER0's valley. Must be

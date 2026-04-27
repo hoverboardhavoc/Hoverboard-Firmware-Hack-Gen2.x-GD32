@@ -48,6 +48,7 @@
 #include <libopencm3/gd32/f1x0/dma.h>
 #include <libopencm3/gd32/f1x0/nvic.h>
 #include <libopencm3/gd32/f1x0/timer.h>
+#include <libopencm3/gd32/f1x0/adc.h>
 
 #ifndef pinMode
 void pinMode(uint32_t pin, uint32_t mode)
@@ -733,112 +734,122 @@ void ADC_initOld(void)
 }
 */
 
-void ADC_init(void)
+//----------------------------------------------------------------------------
+// adc_init — ADC0 (= libopencm3 ADC1) regular group with DMA + external
+// trigger from TIM3 TRGO. Phase 2 stage 5c.
+//
+// GD32F1x0 ADC is the STM32F1-style v1 layout (RSQ1/2/3 sequence, SAMPT0/1
+// per-channel sample times, two-step RSTCLB+CLB calibration). The fork's
+// gd32/f1x0/adc.h forwards directly to stm32/f1/adc.h. Per regtrace
+// decisions/v0.2/ADC.md the layouts are bit-compatible for the operations
+// this firmware uses.
+//
+// Pin → channel decoding inherits from PIN_TO_CHANNEL() in target.h:
+//   GPIOA pin n → channel n        (PA0..PA7 = ch 0..7)
+//   GPIOB pin n → channel n + 8    (PB0..PB1 = ch 8..9)
+// (GD32F130 only has 10 ADC channels on the 48-pin package.)
+//
+// Trigger sequence is two-step on purpose: ETSRC=SWSTART during init →
+// calibrate → ETSRC=TIM3_TRGO afterwards. Some F130 silicon hangs the
+// RSTCLB/CLB sequence if ETERC=1 + a non-SW ETSRC is set before
+// calibration completes; this preserves the SPL workaround.
+//
+// EXTSEL bit values: STM32F1 ADC1 (bit positions per stm32/f1/adc.h):
+//   ADC_CR2_EXTSEL_TIM3_TRGO = 0x4 << 17 — same value as GD's
+//   ADC_EXTTRIG_REGULAR_T2_TRGO (T2 in GD = TIM3 in STM32 numbering).
+//   ADC_CR2_EXTSEL_SWSTART   = 0x7 << 17 — software trigger; conversion
+//   started by writing SWSTART bit.
+//----------------------------------------------------------------------------
+void adc_init(void)
 {
-	// Enable ADC and DMA clock
-	rcu_periph_clock_enable(RCU_ADC);
-	rcu_periph_clock_enable(RCU_DMA);
-	
-  // Configure ADC clock (APB2 clock is DIV1 -> 72MHz, ADC clock is DIV6 -> 12MHz)
-	rcu_adc_clock_config(RCU_ADCCK_APB2_DIV6);
-	
-	// Interrupt channel 0 enable
-	TARGET_nvic_irq_enable(DMA_Channel0_IRQn, 1, 0);	// will trigger CalculateBldc(); Can interrupt 2+ = Timeout/Usart but not bldc or hall-irqs
-	
-	// Initialize DMA channel 0 for ADC
-	TARGET_dma_deinit(DMA_CH0);
-	
-	uint16_t iCountAdc = sizeof(adc_buffer)/2;	// array of uint16_t
-	//iCountAdc = 4;
-	
-	dma_init_struct_adc.direction = DMA_PERIPHERAL_TO_MEMORY;
-	dma_init_struct_adc.memory_addr = (uint32_t)&adc_buffer;
-	dma_init_struct_adc.memory_inc = DMA_MEMORY_INCREASE_ENABLE;
-	dma_init_struct_adc.memory_width = DMA_MEMORY_WIDTH_16BIT;
-	dma_init_struct_adc.number = iCountAdc;
-	
-	dma_init_struct_adc.periph_addr = (uint32_t)&TARGET_ADC_RDATA;
-	dma_init_struct_adc.periph_inc = DMA_PERIPH_INCREASE_DISABLE;
-	dma_init_struct_adc.periph_width = DMA_PERIPHERAL_WIDTH_16BIT;
-	dma_init_struct_adc.priority = DMA_PRIORITY_ULTRA_HIGH;
-	TARGET_dma_init(DMA_CH0, &dma_init_struct_adc);
-	
-	// Configure DMA mode
-	TARGET_dma_circulation_enable(DMA_CH0);
-	TARGET_dma_memory_to_memory_disable(DMA_CH0);
-	
-	// Enable DMA transfer complete interrupt
-	TARGET_dma_interrupt_enable(DMA_CH0, DMA_CHXCTL_FTFIE);
-	
-	// At least clear number of remaining data to be transferred by the DMA 
-	TARGET_dma_transfer_number_config(DMA_CH0, iCountAdc);		// 2
-	
-	// Enable DMA channel 0
-	TARGET_dma_channel_enable(DMA_CH0);
-	
-	
+	rcc_periph_clock_enable(RCC_ADC1);
+	rcc_periph_clock_enable(RCC_DMA);
+
+	// ADC clock = APB2 / 6 = 72 MHz / 6 = 12 MHz. Above 14 MHz is out of
+	// spec on this part; /6 leaves some headroom.
+	rcc_set_adcpre(RCC_CFGR_ADCPRE_DIV6);
+
+	// NVIC: DMA1 channel 1 (= GD DMA_CH0) for the ADC scan-complete IRQ.
+	// Pre-empt priority 1 — can interrupt priorities 2+ (timeout, USART)
+	// but not 0 (BLDC/hall) per the firmware's pre-empt hierarchy.
+	nvic_set_priority(NVIC_DMA_CHANNEL1_IRQ, 1 << 4);
+	nvic_enable_irq(NVIC_DMA_CHANNEL1_IRQ);
+
+	uint16_t adc_count = sizeof(adc_buffer) / 2;  // adc_buffer is uint16_t[]
+
+	// DMA channel 1 (= GD CH0): peripheral-to-memory, 16-bit transfers,
+	// circular, transfer-complete IRQ. Reads from ADC_DR (data register
+	// alias for ADC1's converted-data register).
+	dma_channel_reset(DMA1, DMA_CHANNEL1);
+	dma_set_peripheral_address(DMA1, DMA_CHANNEL1, (uint32_t)&ADC_DR(ADC1));
+	dma_set_memory_address(DMA1, DMA_CHANNEL1, (uint32_t)&adc_buffer);
+	dma_set_number_of_data(DMA1, DMA_CHANNEL1, adc_count);
+	dma_set_read_from_peripheral(DMA1, DMA_CHANNEL1);
+	dma_disable_peripheral_increment_mode(DMA1, DMA_CHANNEL1);
+	dma_enable_memory_increment_mode(DMA1, DMA_CHANNEL1);
+	dma_set_peripheral_size(DMA1, DMA_CHANNEL1, DMA_CCR_PSIZE_16BIT);
+	dma_set_memory_size(DMA1, DMA_CHANNEL1, DMA_CCR_MSIZE_16BIT);
+	dma_set_priority(DMA1, DMA_CHANNEL1, DMA_CCR_PL_VERY_HIGH);
+	dma_enable_circular_mode(DMA1, DMA_CHANNEL1);
+	dma_enable_transfer_complete_interrupt(DMA1, DMA_CHANNEL1);
+	dma_enable_channel(DMA1, DMA_CHANNEL1);
+
+	// Build the regular channel sequence in DMA-fill order so the
+	// adc_buf_t field layout matches. Phase currents first (sampled at
+	// the PWM valley), then slower channels.
+	uint8_t channels[8];
+	uint8_t length = 0;
+
 	#ifdef REMOTE_AUTODETECT
-		TARGET_adc_channel_length_config(ADC_REGULAR_CHANNEL, 1);
-		TARGET_adc_regular_channel_config(0, PIN_TO_CHANNEL(TODO_PIN), ADC_SAMPLETIME_13POINT5);
-			// for some reason, the adc channel 1 used for VBat (3.3V) has to be set to TODO_PIN = PF4
+		channels[length++] = PIN_TO_CHANNEL(TODO_PIN);
 	#else
-		TARGET_adc_channel_length_config(ADC_REGULAR_CHANNEL, iCountAdc);
-		// Rank order matches adc_buf_t field order (DMA fills sequentially).
-		// Phase currents first so they sample at/near the PWM valley; slower
-		// channels trail them. See foc.md for why this matters at high duty.
-		uint8_t iRank = 0;
 		#if defined(PHASE_CURRENT_A) && defined(PHASE_CURRENT_B)
-			TARGET_adc_regular_channel_config(iRank++, PIN_TO_CHANNEL(PHASE_CURRENT_A), ADC_SAMPLETIME_13POINT5);
-			TARGET_adc_regular_channel_config(iRank++, PIN_TO_CHANNEL(PHASE_CURRENT_B), ADC_SAMPLETIME_13POINT5);
+			channels[length++] = PIN_TO_CHANNEL(PHASE_CURRENT_A);
+			channels[length++] = PIN_TO_CHANNEL(PHASE_CURRENT_B);
 		#endif
 		#ifdef VBATT
-			TARGET_adc_regular_channel_config(iRank++, PIN_TO_CHANNEL(VBATT), ADC_SAMPLETIME_13POINT5);
+			channels[length++] = PIN_TO_CHANNEL(VBATT);
 		#endif
 		#ifdef CURRENT_DC
-			TARGET_adc_regular_channel_config(iRank++, PIN_TO_CHANNEL(CURRENT_DC), ADC_SAMPLETIME_13POINT5);
+			channels[length++] = PIN_TO_CHANNEL(CURRENT_DC);
 		#endif
 		#ifdef REMOTE_ADC
-			TARGET_adc_regular_channel_config(iRank++, PIN_TO_CHANNEL(PA2), ADC_SAMPLETIME_13POINT5);
-			TARGET_adc_regular_channel_config(iRank++, PIN_TO_CHANNEL(PA3), ADC_SAMPLETIME_13POINT5);
+			channels[length++] = PIN_TO_CHANNEL(PA2);
+			channels[length++] = PIN_TO_CHANNEL(PA3);
 		#endif
 	#endif
 
-	TARGET_adc_data_alignment_config(ADC_DATAALIGN_RIGHT);
+	adc_set_regular_sequence(ADC1, length, channels);
+	adc_set_sample_time_on_all_channels(ADC1, ADC_SMPR_SMP_13DOT5CYC);
 
-	// Default external trigger to software during init. The real source
-	// (T2_TRGO for FOC, SWRCST for non-FOC) is programmed AFTER calibration
-	// further down — some F130 silicon hangs RSTCLB/CLB if ETERC=1 is paired
-	// with a non-software ETSRC before calibration completes.
-	TARGET_adc_external_trigger_config(ADC_REGULAR_CHANNEL, ENABLE);
-	TARGET_adc_external_trigger_source_config(ADC_REGULAR_CHANNEL, ADC_EXTTRIG_REGULAR_NONE);
+	adc_set_right_aligned(ADC1);
 
-	// Disable the temperature sensor, Vrefint and vbat channel
-	adc_tempsensor_vrefint_disable();
+	// Step 1 of the trigger sequence: SWSTART. ETERC must be 1 for any
+	// external trigger (incl. SW) to work. Real source set after calib.
+	adc_enable_external_trigger_regular(ADC1, ADC_CR2_EXTSEL_SWSTART);
+
+	adc_disable_temperature_sensor();
 	#ifndef REMOTE_AUTODETECT
-		TARGET_adc_vbat_disable();
+		adc_disable_temperature_sensor();  // SPL "vbat_disable" is an alias —
+		                                   // disabling Vrefint/temp sensor
+		                                   // also disables Vbat divider.
 	#endif
+	adc_disable_analog_watchdog_regular(ADC1);
 
-	// ADC analog watchdog disable
-	TARGET_adc_watchdog_disable();
+	// Power on, then calibrate. adc_calibrate() handles the RSTCLB+CLB
+	// two-step + waits for completion.
+	adc_power_on(ADC1);
+	adc_calibrate(ADC1);
 
-	// Enable ADC (must be before calibration)
-	TARGET_adc_enable();
-
-	// Calibrate ADC values
-	TARGET_adc_calibration_enable();
-
-	// Hardware trigger: TIMER2 TRGO fires at FOC_SAMPLE_OFFSET_TICKS past
-	// every PWM valley (see ADC_Trigger_Timer_init). Programmed here, after
-	// calibration, per the TRM §10.4.1 order of operations.
+	// Step 2 of the trigger sequence: post-calibration, switch ETSRC to
+	// TIM3_TRGO so the ADC fires hardware-driven from the PWM-valley
+	// pipeline set up in pwm_init + adc_trigger_timer_init.
 	#if defined(PHASE_CURRENT_A) && defined(PHASE_CURRENT_B)
-		TARGET_adc_external_trigger_source_config(ADC_REGULAR_CHANNEL, ADC_EXTTRIG_REGULAR_T2_TRGO);
+		adc_enable_external_trigger_regular(ADC1, ADC_CR2_EXTSEL_TIM3_TRGO);
 	#endif
 
-	// Enable DMA request
-	TARGET_adc_dma_mode_enable();
-
-	// Set ADC to scan mode
-	TARGET_adc_special_function_config(ADC_SCAN_MODE, ENABLE);
+	adc_enable_dma(ADC1);
+	adc_enable_scan_mode(ADC1);
 }
 
 
