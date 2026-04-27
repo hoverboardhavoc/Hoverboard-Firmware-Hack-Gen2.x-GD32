@@ -34,7 +34,7 @@ CFLAGS  := -Os -Wall -Wextra -ffunction-sections -fdata-sections \
 # Per-file compile (no link until enough is ported to have a coherent
 # whole). Each ported .c gets a .o; building all .o validates the
 # include + API translation work.
-SRCS := Src/setup.c
+SRCS := Src/setup.c Src/it.c Src/main.c
 OBJS := $(SRCS:.c=.o)
 
 all: $(OBJS)
