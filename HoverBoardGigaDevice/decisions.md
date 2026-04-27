@@ -11,7 +11,7 @@
 | 5. pwm_init | ✅ none needed | ✅ basic-init covered, output/break per-call mapped | ⬜ partial vector | ✅ |
 | 6. adc_trigger_timer_init | ✅ none needed | ⬜ no covering vector | n/a | ✅ |
 | 7. adc_init | ✅ none needed | ✅ partial (sequence + sample time) | ⬜ | ✅ |
-| ISR rename in `it.c` | n/a | n/a | n/a | ⬜ |
+| ISR rename in `it.c` | n/a | n/a | n/a | ✅ |
 | Delete lib/spl/, platformio.ini | n/a | n/a | n/a | ⬜ |
 | `make` builds firmware | n/a | n/a | n/a | ⬜ |
 
