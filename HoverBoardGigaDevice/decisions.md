@@ -71,6 +71,86 @@ firmware build.
 
 ---
 
+## 2026-04-27 — Phase 2 finalization: it.c ISR rename + HAL inline
+
+**Why:** The libopencm3 vector table uses lowercase `*_isr` symbols. A
+CMSIS-style `*_IRQHandler` left in `it.c` after the port links cleanly
+but its vector slot resolves to libopencm3's weak default — the IRQ
+silently does nothing at runtime, no linker warning. Brief Done
+condition #3 explicitly flags this as the silent-failure mode to
+catch.
+
+**What I did:** every handler in `Src/it.c` renamed to its libopencm3
+symbol (verified against the fork's `vector_nvic.c` and `cm3/vector.c`):
+`SysTick_Handler` → `sys_tick_handler`, `TIMEOUT_IrqHandler` (=
+`TIMER13_IRQHandler`) → `tim14_isr`,
+`TARGET_TIMER0_BRK_UP_TRG_COM_IRQHandler` →
+`tim1_brk_up_trg_com_isr`, `TARGET_DMA_Channel0_IRQHandler` (= GD CH0)
+→ `dma_channel1_isr`, `TARGET_DMA_Channel1_2_IRQHandler` →
+`dma_channel2_3_isr`, `TARGET_DMA_Channel3_4_IRQHandler` →
+`dma_channel4_5_isr`, plus the Cortex-M3 system handlers (`NMI_Handler`
+→ `nmi_handler`, etc.).
+
+**Brief discrepancy noted**: the brief's stage-4 table specified
+`dma1_channel1_isr` etc. with a `1` prefix matching STM32F1; the fork's
+GD32F1x0 vector uses simpler `dma_channelN_isr` (no `1` prefix —
+F1x0 has only one DMA controller). Used the fork's actual symbol
+names.
+
+**HAL calls inlined** in handler bodies per guardrail #5: 
+`timer_interrupt_flag_get`/`_clear` → `timer_get_flag`/`timer_clear_flag`,
+`TARGET_dma_interrupt_flag_get`/`_clear` →
+`dma_get_interrupt_flag`/`dma_clear_interrupt_flags`,
+`TARGET_adc_software_trigger_enable` → `adc_start_conversion_regular`.
+
+**Out of scope this stage**: the F103-only `DMA0_Channel2_IRQHandler`
+block (TARGET==2) — dead code on F130; removed at SPL teardown.
+
+---
+
+## 2026-04-27 — Phase 2 stage 5c: adc_init ported
+
+**What I did:** ADC0 (= ADC1 lp) regular-group + DMA + external-trigger
+fully inlined. Adapter from SPL `dma_init_struct_adc` gather pattern to
+libopencm3 per-attribute setters; ADC sequence built conditionally from
+PHASE_CURRENT_A/B + VBATT + CURRENT_DC + REMOTE_ADC defines into a
+`channels[]` array; `adc_set_regular_sequence` + `adc_set_sample_time_on
+_all_channels(13DOT5CYC)`. Two-step trigger preserved: SWSTART during
+calibration → TIM3_TRGO afterwards. NVIC_DMA_CHANNEL1_IRQ at priority 1.
+ADC clock = APB2/6 = 12 MHz via `rcc_set_adcpre`. See commit log for
+full mapping.
+
+---
+
+## 2026-04-27 — Phase 2 stage 5b: adc_trigger_timer_init ported
+
+**What I did:** TIMER2 (= TIM3 lp) as fixed-offset slave to TIM1. Slave
+mode RM (= reset-on-trigger) on ITI0 (= TIM1 TRGO); CH1 PWM-mode-1
+output compare at FOC_SAMPLE_OFFSET_TICKS; TRGO source = OC1REF (MMS =
+COMPARE_OC1REF). Output pin disabled — only the internal OC1REF feeds
+the master-mode TRGO. CEN=1 (slave reset doesn't toggle CEN). No
+covering vector exists; per-call mapping verified against the F1x0 RM
+§15 slave-mode table.
+
+---
+
+## 2026-04-27 — Phase 2 stage 5a: pwm_init ported
+
+**What I did:** TIMER0 (= TIM1 lp) advanced timer center-aligned PWM at
+16 kHz with 3 complementary output pairs + dead-time + break + TRGO on
+update event. SPL `timer_init` + `timer_break_config` + per-channel
+output config replaced piecewise by libopencm3 setters. Channel loop
+covers TIM_OC1/2/3 + TIM_OC1N/2N/3N. BDTR setup uses
+`timer_set_enabled_off_state_in_run_mode` (OSSR=1),
+`timer_enable_break_automatic_output` (AOE=1),
+`timer_disable_break` (BKE=0; HarleyBob convention),
+`timer_set_deadtime(DEAD_TIME)`. Master mode = UPDATE → TRGO drives
+TIM3 in adc_trigger_timer_init. NVIC_TIM1_BRK_UP_TRG_COM_IRQ priority
+0. Vector `vectors/timer/pwm_init_center_aligned_16khz.yaml` covers
+the basic init shape; output/break per-call mapping documented inline.
+
+---
+
 ## 2026-04-27 — Phase 2 stage 4: usart0_init ported (with DMA RX)
 
 **Why:** Brief Phase 2 stage 4: `USART0_Init` + RX ISR + USART1_IRQ
