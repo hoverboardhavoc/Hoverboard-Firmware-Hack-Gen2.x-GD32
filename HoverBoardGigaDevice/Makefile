@@ -11,7 +11,13 @@ OBJCOPY  = $(CROSS)objcopy
 SIZE     = $(CROSS)size
 
 CPUFLAGS = -mcpu=cortex-m3 -mthumb
-DEFS     = -D GD32F1X0 -D STM32F1
+# GD32F1X0 selects the fork's gd32/f1x0 family in libopencm3's stm32/<peripheral>.h
+# dispatchers — those pull in stm32/f0/<peripheral>.h for v2 GPIO/ADC/etc. Don't
+# also define STM32F1 here: that's v1 GPIO/etc. and would win the dispatcher
+# #elif chain over GD32F1X0, routing to the wrong family.
+# TARGET=1 selects the GD32F130 path through Inc/target.h and the active
+# Inc/defines/defines_2-1-${LAYOUT}.h pin map.
+DEFS     = -D GD32F1X0 -D GD32F130 -D TARGET=1
 WARNINGS = -Wall -Wextra -Wno-unused-parameter -Wno-unused-function \
            -Wno-unused-variable -Wno-unused-but-set-variable \
            -Wno-missing-field-initializers

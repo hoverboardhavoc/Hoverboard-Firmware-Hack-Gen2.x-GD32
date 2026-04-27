@@ -41,6 +41,7 @@
  * removed file-wide. See decisions.md for the staging rationale. */
 #include <libopencm3/cm3/scb.h>
 #include <libopencm3/gd32/f1x0/rcc.h>
+#include <libopencm3/gd32/f1x0/gpio.h>
 
 #ifndef pinMode
 void pinMode(uint32_t pin, uint32_t mode)
@@ -148,125 +149,159 @@ void TimeoutTimer_init(void)
 
 //----------------------------------------------------------------------------
 // Initializes the GPIOs
+//
+// Phase 2 stage 2 of the libopencm3 port. Every pin config is inlined as
+// direct gpio_mode_setup + gpio_set_output_options (+ gpio_set_af) calls
+// against libopencm3 — no pinMode/pinModeAF/AF_TIMER0_BLDC helper macros
+// (those are SPL-shape shims per brief guardrail #5). The firmware's
+// packed pin-code convention `(GPIOx | n)` survives: extract the port via
+// `& 0xffffff00U`, extract the bit mask via `1U << (& 0xfU)`. Speed
+// mapping: SPL GPIO_OSPEED_2MHZ→LOW, _10MHZ→MED, _50MHZ→HIGH (same
+// numeric values, libopencm3 names).
+//
+// AF map for GD32F130 (per datasheet 2.6.7): TIMER0 channels are all
+// GPIO_AF2; TIMER0 BRKIN on PA6 or PB12 is GPIO_AF2 too. USART0 on PB6/PB7
+// is GPIO_AF0; on PA2/PA3/PA9/PA10/PA14/PA15 is GPIO_AF1. USART1 on
+// PA8/PB0 is GPIO_AF4; on PA2/PA3/PA14/PA15 is GPIO_AF1.
 //----------------------------------------------------------------------------
-void GPIO_init(void)
+void gpio_init(void)
 {
-	// Enable all GPIO clocks
-	rcu_periph_clock_enable(RCU_GPIOA);
-	rcu_periph_clock_enable(RCU_GPIOB);
-	rcu_periph_clock_enable(RCU_GPIOC);
-	rcu_periph_clock_enable(RCU_GPIOF);
+	// Enable all GPIO clocks (libopencm3 RCC_GPIOx ↔ SPL RCU_GPIOx).
+	rcc_periph_clock_enable(RCC_GPIOA);
+	rcc_periph_clock_enable(RCC_GPIOB);
+	rcc_periph_clock_enable(RCC_GPIOC);
+	rcc_periph_clock_enable(RCC_GPIOF);
 
-	
 	#ifdef TIMER_BLDC_EMERGENCY_SHUTDOWN
-		// Init emergency shutdown pin
-		pinModeAF(TIMER_BLDC_EMERGENCY_SHUTDOWN,AF_TIMER0_BRKIN,GPIO_PUPD_NONE,GPIO_OSPEED_50MHZ)
+		// Emergency shutdown pin → TIMER0 BRKIN, AF2.
+		gpio_mode_setup(TIMER_BLDC_EMERGENCY_SHUTDOWN & 0xffffff00U,
+				GPIO_MODE_AF, GPIO_PUPD_NONE,
+				1U << (TIMER_BLDC_EMERGENCY_SHUTDOWN & 0xfU));
+		gpio_set_output_options(TIMER_BLDC_EMERGENCY_SHUTDOWN & 0xffffff00U,
+				GPIO_OTYPE_PP, GPIO_OSPEED_HIGH,
+				1U << (TIMER_BLDC_EMERGENCY_SHUTDOWN & 0xfU));
+		gpio_set_af(TIMER_BLDC_EMERGENCY_SHUTDOWN & 0xffffff00U,
+				GPIO_AF2,
+				1U << (TIMER_BLDC_EMERGENCY_SHUTDOWN & 0xfU));
 	#endif
-	
-	// Init PWM output Pins
-	// Configure: Alternate functions,  [Floating mode] / Pull-up / Pull-down
-	// Configure: Push-Pull mode, Output max speed 2MHz
-	pinModeAF(BLDC_GH, AF_TIMER0_BLDC, TIMER_BLDC_PULLUP, GPIO_OSPEED_2MHZ);
-	pinModeAF(BLDC_GL, AF_TIMER0_BLDC, TIMER_BLDC_PULLUP, GPIO_OSPEED_2MHZ);
-	pinModeAF(BLDC_BH, AF_TIMER0_BLDC, TIMER_BLDC_PULLUP, GPIO_OSPEED_2MHZ);
-	pinModeAF(BLDC_BL, AF_TIMER0_BLDC, TIMER_BLDC_PULLUP, GPIO_OSPEED_2MHZ);
-	pinModeAF(BLDC_YH, AF_TIMER0_BLDC, TIMER_BLDC_PULLUP, GPIO_OSPEED_2MHZ);
-	pinModeAF(BLDC_YL, AF_TIMER0_BLDC, TIMER_BLDC_PULLUP, GPIO_OSPEED_2MHZ);
 
+	// PWM output pins — TIMER0 channels CH0/CH0N/CH1/CH1N/CH2/CH2N (all AF2),
+	// 2 MHz output speed (suppresses ringing into the gate driver),
+	// pull configured per board (TIMER_BLDC_PULLUP from active layout).
+	gpio_mode_setup(BLDC_GH & 0xffffff00U, GPIO_MODE_AF, TIMER_BLDC_PULLUP, 1U << (BLDC_GH & 0xfU));
+	gpio_set_output_options(BLDC_GH & 0xffffff00U, GPIO_OTYPE_PP, GPIO_OSPEED_LOW, 1U << (BLDC_GH & 0xfU));
+	gpio_set_af(BLDC_GH & 0xffffff00U, GPIO_AF2, 1U << (BLDC_GH & 0xfU));
 
-	
+	gpio_mode_setup(BLDC_GL & 0xffffff00U, GPIO_MODE_AF, TIMER_BLDC_PULLUP, 1U << (BLDC_GL & 0xfU));
+	gpio_set_output_options(BLDC_GL & 0xffffff00U, GPIO_OTYPE_PP, GPIO_OSPEED_LOW, 1U << (BLDC_GL & 0xfU));
+	gpio_set_af(BLDC_GL & 0xffffff00U, GPIO_AF2, 1U << (BLDC_GL & 0xfU));
+
+	gpio_mode_setup(BLDC_BH & 0xffffff00U, GPIO_MODE_AF, TIMER_BLDC_PULLUP, 1U << (BLDC_BH & 0xfU));
+	gpio_set_output_options(BLDC_BH & 0xffffff00U, GPIO_OTYPE_PP, GPIO_OSPEED_LOW, 1U << (BLDC_BH & 0xfU));
+	gpio_set_af(BLDC_BH & 0xffffff00U, GPIO_AF2, 1U << (BLDC_BH & 0xfU));
+
+	gpio_mode_setup(BLDC_BL & 0xffffff00U, GPIO_MODE_AF, TIMER_BLDC_PULLUP, 1U << (BLDC_BL & 0xfU));
+	gpio_set_output_options(BLDC_BL & 0xffffff00U, GPIO_OTYPE_PP, GPIO_OSPEED_LOW, 1U << (BLDC_BL & 0xfU));
+	gpio_set_af(BLDC_BL & 0xffffff00U, GPIO_AF2, 1U << (BLDC_BL & 0xfU));
+
+	gpio_mode_setup(BLDC_YH & 0xffffff00U, GPIO_MODE_AF, TIMER_BLDC_PULLUP, 1U << (BLDC_YH & 0xfU));
+	gpio_set_output_options(BLDC_YH & 0xffffff00U, GPIO_OTYPE_PP, GPIO_OSPEED_LOW, 1U << (BLDC_YH & 0xfU));
+	gpio_set_af(BLDC_YH & 0xffffff00U, GPIO_AF2, 1U << (BLDC_YH & 0xfU));
+
+	gpio_mode_setup(BLDC_YL & 0xffffff00U, GPIO_MODE_AF, TIMER_BLDC_PULLUP, 1U << (BLDC_YL & 0xfU));
+	gpio_set_output_options(BLDC_YL & 0xffffff00U, GPIO_OTYPE_PP, GPIO_OSPEED_LOW, 1U << (BLDC_YL & 0xfU));
+	gpio_set_af(BLDC_YL & 0xffffff00U, GPIO_AF2, 1U << (BLDC_YL & 0xfU));
+
 	#ifndef REMOTE_AUTODETECT
-	
-	
-		#ifdef DEBUG_LED_PIN
-			gpio_mode_set(DEBUG_LED_PORT , GPIO_MODE_OUTPUT, GPIO_PUPD_NONE,DEBUG_LED_PIN);	
-			gpio_output_options_set(DEBUG_LED_PORT, GPIO_OTYPE_PP, GPIO_OSPEED_10MHZ, DEBUG_LED_PIN);
-		#endif
 
+		#ifdef DEBUG_LED_PIN
+			gpio_mode_setup(DEBUG_LED_PORT, GPIO_MODE_OUTPUT, GPIO_PUPD_NONE, DEBUG_LED_PIN);
+			gpio_set_output_options(DEBUG_LED_PORT, GPIO_OTYPE_PP, GPIO_OSPEED_MED, DEBUG_LED_PIN);
+		#endif
 
 		#ifdef LED_GREEN
-			pinMode(LED_GREEN,	GPIO_MODE_OUTPUT);
+			gpio_mode_setup(LED_GREEN & 0xffffff00U, GPIO_MODE_OUTPUT, GPIO_PUPD_NONE, 1U << (LED_GREEN & 0xfU));
+			gpio_set_output_options(LED_GREEN & 0xffffff00U, GPIO_OTYPE_PP, GPIO_OSPEED_MED, 1U << (LED_GREEN & 0xfU));
 		#endif
 		#ifdef LED_RED
-			pinMode(LED_RED,		GPIO_MODE_OUTPUT);
+			gpio_mode_setup(LED_RED & 0xffffff00U, GPIO_MODE_OUTPUT, GPIO_PUPD_NONE, 1U << (LED_RED & 0xfU));
+			gpio_set_output_options(LED_RED & 0xffffff00U, GPIO_OTYPE_PP, GPIO_OSPEED_MED, 1U << (LED_RED & 0xfU));
 		#endif
 		#ifdef LED_ORANGE
-			pinMode(LED_ORANGE,	GPIO_MODE_OUTPUT);
+			gpio_mode_setup(LED_ORANGE & 0xffffff00U, GPIO_MODE_OUTPUT, GPIO_PUPD_NONE, 1U << (LED_ORANGE & 0xfU));
+			gpio_set_output_options(LED_ORANGE & 0xffffff00U, GPIO_OTYPE_PP, GPIO_OSPEED_MED, 1U << (LED_ORANGE & 0xfU));
 		#endif
 		#ifdef UPPER_LED
-			pinMode(UPPER_LED,	GPIO_MODE_OUTPUT);
+			gpio_mode_setup(UPPER_LED & 0xffffff00U, GPIO_MODE_OUTPUT, GPIO_PUPD_NONE, 1U << (UPPER_LED & 0xfU));
+			gpio_set_output_options(UPPER_LED & 0xffffff00U, GPIO_OTYPE_PP, GPIO_OSPEED_MED, 1U << (UPPER_LED & 0xfU));
 		#endif
 		#ifdef LOWER_LED
-			pinMode(LOWER_LED,	GPIO_MODE_OUTPUT);
+			gpio_mode_setup(LOWER_LED & 0xffffff00U, GPIO_MODE_OUTPUT, GPIO_PUPD_NONE, 1U << (LOWER_LED & 0xfU));
+			gpio_set_output_options(LOWER_LED & 0xffffff00U, GPIO_OTYPE_PP, GPIO_OSPEED_MED, 1U << (LOWER_LED & 0xfU));
 		#endif
 		#ifdef MOSFET_OUT
-			pinMode(MOSFET_OUT,	GPIO_MODE_OUTPUT);
+			gpio_mode_setup(MOSFET_OUT & 0xffffff00U, GPIO_MODE_OUTPUT, GPIO_PUPD_NONE, 1U << (MOSFET_OUT & 0xfU));
+			gpio_set_output_options(MOSFET_OUT & 0xffffff00U, GPIO_OTYPE_PP, GPIO_OSPEED_MED, 1U << (MOSFET_OUT & 0xfU));
 		#endif
 
+		// Hall sensor inputs — floating, debounced via the hall-width learner
+		// in bldcFOC. No pull required because the hoverboard hall PCB has
+		// open-drain comparators with on-board pull-ups already.
+		gpio_mode_setup(HALL_A & 0xffffff00U, GPIO_MODE_INPUT, GPIO_PUPD_NONE, 1U << (HALL_A & 0xfU));
+		gpio_mode_setup(HALL_B & 0xffffff00U, GPIO_MODE_INPUT, GPIO_PUPD_NONE, 1U << (HALL_B & 0xfU));
+		gpio_mode_setup(HALL_C & 0xffffff00U, GPIO_MODE_INPUT, GPIO_PUPD_NONE, 1U << (HALL_C & 0xfU));
 
-		#ifdef DEBUG_LED_PIN
-			gpio_mode_set(DEBUG_LED_PORT , GPIO_MODE_OUTPUT, GPIO_PUPD_NONE,DEBUG_LED_PIN);	
-			gpio_output_options_set(DEBUG_LED_PORT, GPIO_OTYPE_PP, GPIO_OSPEED_10MHZ, DEBUG_LED_PIN);
-		#endif
-	
-	
-		// Init HAL input
-		pinMode(HALL_A,	GPIO_MODE_INPUT);
-		pinMode(HALL_B,	GPIO_MODE_INPUT);
-		pinMode(HALL_C,	GPIO_MODE_INPUT);
-	
-		// Init ADC pins
+		// ADC analog inputs — analog mode disconnects the digital input
+		// (Schmitt trigger off, no glitch energy on the supply).
 		#ifdef VBATT
-			pinMode(VBATT, GPIO_MODE_ANALOG);
+			gpio_mode_setup(VBATT & 0xffffff00U, GPIO_MODE_ANALOG, GPIO_PUPD_NONE, 1U << (VBATT & 0xfU));
 		#endif
 		#ifdef CURRENT_DC
-			pinMode(CURRENT_DC, GPIO_MODE_ANALOG);
+			gpio_mode_setup(CURRENT_DC & 0xffffff00U, GPIO_MODE_ANALOG, GPIO_PUPD_NONE, 1U << (CURRENT_DC & 0xfU));
 		#endif
 		#if defined(PHASE_CURRENT_A) && defined(PHASE_CURRENT_B)
-			pinMode(PHASE_CURRENT_A, GPIO_MODE_ANALOG);
-			pinMode(PHASE_CURRENT_B, GPIO_MODE_ANALOG);
+			gpio_mode_setup(PHASE_CURRENT_A & 0xffffff00U, GPIO_MODE_ANALOG, GPIO_PUPD_NONE, 1U << (PHASE_CURRENT_A & 0xfU));
+			gpio_mode_setup(PHASE_CURRENT_B & 0xffffff00U, GPIO_MODE_ANALOG, GPIO_PUPD_NONE, 1U << (PHASE_CURRENT_B & 0xfU));
 		#endif
 		#ifdef REMOTE_ADC
-			pinMode(PA2, GPIO_MODE_ANALOG);
-			pinMode(PA3, GPIO_MODE_ANALOG);
+			gpio_mode_setup(PA2 & 0xffffff00U, GPIO_MODE_ANALOG, GPIO_PUPD_NONE, 1U << (PA2 & 0xfU));
+			gpio_mode_setup(PA3 & 0xffffff00U, GPIO_MODE_ANALOG, GPIO_PUPD_NONE, 1U << (PA3 & 0xfU));
 		#endif
 
-
-		// Init self hold
 		#ifdef SELF_HOLD
-			pinMode(SELF_HOLD,	GPIO_MODE_OUTPUT);
+			gpio_mode_setup(SELF_HOLD & 0xffffff00U, GPIO_MODE_OUTPUT, GPIO_PUPD_NONE, 1U << (SELF_HOLD & 0xfU));
+			gpio_set_output_options(SELF_HOLD & 0xffffff00U, GPIO_OTYPE_PP, GPIO_OSPEED_MED, 1U << (SELF_HOLD & 0xfU));
 		#endif
 
 		#ifdef BUZZER
-			// Init buzzer
-			pinModeSpeed(BUZZER,	GPIO_MODE_OUTPUT,GPIO_OSPEED_50MHZ);
-			//gpio_mode_set(BUZZER_PORT , GPIO_MODE_OUTPUT, GPIO_PUPD_NONE, BUZZER_PIN);	
-			//gpio_output_options_set(BUZZER_PORT, GPIO_OTYPE_PP, GPIO_OSPEED_50MHZ, BUZZER_PIN);
+			// 50 MHz output speed for the buzzer — the carrier needs sharp
+			// edges so the audible note isn't muddied by output-stage rolloff.
+			gpio_mode_setup(BUZZER & 0xffffff00U, GPIO_MODE_OUTPUT, GPIO_PUPD_NONE, 1U << (BUZZER & 0xfU));
+			gpio_set_output_options(BUZZER & 0xffffff00U, GPIO_OTYPE_PP, GPIO_OSPEED_HIGH, 1U << (BUZZER & 0xfU));
 		#endif
 
 		#ifdef MASTER_OR_SINGLE
-		
-			// Init button
 			#ifdef BUTTON_PU
-				pinModePull(BUTTON_PU,GPIO_MODE_INPUT,GPIO_PUPD_PULLUP);
+				// Button with internal pull-up. Reads HIGH when not pressed,
+				// LOW when pressed (open switch to GND).
+				gpio_mode_setup(BUTTON_PU & 0xffffff00U, GPIO_MODE_INPUT, GPIO_PUPD_PULLUP, 1U << (BUTTON_PU & 0xfU));
 			#elif defined(BUTTON)
-				pinMode(BUTTON,	GPIO_MODE_INPUT);
+				gpio_mode_setup(BUTTON & 0xffffff00U, GPIO_MODE_INPUT, GPIO_PUPD_NONE, 1U << (BUTTON & 0xfU));
 			#endif
-			
+
 			#if defined(CHARGE_STATE) && defined(MASTER_OR_SINGLE)
-				pinModePull(CHARGE_STATE,GPIO_MODE_INPUT, GPIO_PUPD_PULLUP);
+				gpio_mode_setup(CHARGE_STATE & 0xffffff00U, GPIO_MODE_INPUT, GPIO_PUPD_PULLUP, 1U << (CHARGE_STATE & 0xfU));
 			#endif
 		#endif
-		
+
 		#ifdef PHOTO_L
-			pinModePull(PHOTO_L,GPIO_MODE_INPUT,GPIO_PUPD_PULLUP);
+			gpio_mode_setup(PHOTO_L & 0xffffff00U, GPIO_MODE_INPUT, GPIO_PUPD_PULLUP, 1U << (PHOTO_L & 0xfU));
 		#endif
 		#ifdef PHOTO_R
-			pinModePull(PHOTO_R,GPIO_MODE_INPUT,GPIO_PUPD_PULLUP);
+			gpio_mode_setup(PHOTO_R & 0xffffff00U, GPIO_MODE_INPUT, GPIO_PUPD_PULLUP, 1U << (PHOTO_R & 0xfU));
 		#endif
-		
-	#endif // 	#ifndef REMOTE_AUTODETECT
 
+	#endif // #ifndef REMOTE_AUTODETECT
 }
 
 

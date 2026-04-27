@@ -5,7 +5,7 @@
 | Phase 2 stage | Fork ext. | Vector | Trace OK | Firmware ported |
 |---|---|---|---|---|
 | 1. clock_init | ✅ rcc.h+rcc.c (MUL17..32, HSI_72MHZ) | ✅ | ✅ (decided) | ✅ |
-| 2. gpio_init | ⬜ | partial (single pin) | ⬜ | ⬜ |
+| 2. gpio_init | ✅ none needed | ✅ pattern-validated (single pin) | ✅ | ✅ |
 | 3. watchdog_init | ⬜ check | ✅ | ⬜ | ⬜ |
 | 4. usart0_init | ⬜ | partial | ⬜ | ⬜ |
 | 5. pwm_init | ⬜ (advanced timer) | ✅ (basic) | ⬜ | ⬜ |
@@ -68,6 +68,80 @@ extension lands) is the operative milestone — the firmware build is
 green only at the very end. Each commit boundary should align with
 "fork + vector + decisions" trinity for one stage, not with a green
 firmware build.
+
+---
+
+## 2026-04-27 — Phase 2 stage 2: gpio_init ported (inlined macros)
+
+**Why:** Per Phase 2 dependency order, gpio_init follows clock_init.
+The brief's guardrail #5 (no SPL-shaped shims) means the per-pin
+config can't be carried by the existing `pinMode` / `pinModeAF` /
+`AF_TIMER0_BLDC` macro family in `Inc/target.h` — those wrap the SPL
+gpio_mode_set / gpio_output_options_set / gpio_af_set calls and would
+need to either be retargeted or removed. User direction: inline.
+
+**What I did:**
+
+1. **`Src/setup.c::gpio_init`** (formerly `GPIO_init`): every pin's
+   config inlined as direct libopencm3 calls — `gpio_mode_setup`,
+   `gpio_set_output_options`, and (for AF pins) `gpio_set_af`. No use
+   of pinMode/pinModeAF/AF_TIMER0_*/pinModePull/pinModeSpeed inside
+   the function body. The firmware's packed pin-code convention
+   `(GPIOx | n)` survives — extracted at each callsite via
+   `& 0xffffff00U` for the port and `1U << (& 0xfU)` for the bit
+   mask.
+
+2. **AF map inlined too**: PWM channels (BLDC_GH/GL/BH/BL/YH/YL) get
+   `GPIO_AF2` directly (TIMER0 alt-function on GD32F130 per datasheet
+   2.6.7). USART AFs not touched at this stage — they'll inline at
+   `usart0_init` time. The
+   `AF_TIMER0_BLDC(pin)` / `AF_USART0_TX(pin)` / `AF_USART0_RX(pin)`
+   pin-conditional macros in `target.h` still exist for unported
+   callers; they get deleted at the end with the rest of `target.h`'s
+   F130 path.
+
+3. **Speed mapping**: `GPIO_OSPEED_2MHZ` → `GPIO_OSPEED_LOW`,
+   `_10MHZ` → `_MED`, `_50MHZ` → `_HIGH`. Numeric values are
+   identical (0/1/3) — libopencm3 just uses the speed-class names
+   instead of the absolute-MHz names.
+
+4. **Clock enable**: `rcu_periph_clock_enable(RCU_GPIOA..F)` →
+   `rcc_periph_clock_enable(RCC_GPIOA..F)` for all four ports.
+
+5. **`Src/main.c`, `Inc/setup.h`**: callsite + declaration renamed
+   `GPIO_init` → `gpio_init`.
+
+6. **`Makefile` build flags fixed**: removed `-D STM32F1`. The fork's
+   `<libopencm3/stm32/gpio.h>` dispatcher is an `#elif` chain with
+   STM32F1 *before* GD32F1X0 — keeping STM32F1 set would have routed
+   the build to the v1 (CRL/CRH) GPIO instead of the v2 (MODER/PUPDR/
+   OSPEEDR/AFRL/AFRH) GPIO that GD32F130 actually has. The fork's own
+   gd32/f1x0/gpio.h forwards to stm32/f0/gpio.h (v2) which is
+   correct. Added `-D GD32F130` and `-D TARGET=1` while there to
+   match what `platformio.ini` and the uvision project define — the
+   firmware's `Inc/target.h` and the active layout
+   `Inc/defines/defines_2-1-${LAYOUT}.h` need both.
+
+**Vector coverage**: the existing `vectors/gpio/output_pa5_pp_50mhz.yaml`
+covers ONE pin (PA5 push-pull output) with `gd-spl/gd32f1x0` ↔
+`libopencm3/gd32f1x0` validated to match (modulo a benign
+explicit-zero on F10x). The hoverboard `gpio_init` is N applications
+of the same per-pin pattern — no new fork APIs touched, no register
+sequencing differs from the validated single-pin case. A "covering"
+vector that does all ~20 pins would be useful but redundant given the
+inlined body is the same calls × N. Recorded as "pattern-validated"
+rather than "function-covered" in the status table; if regtrace
+caches a per-pin failure mode I'd need to re-evaluate, but the F1x0
+v2 GPIO is straightforward bitfield-per-pin.
+
+**Consequence**: gpio_init no longer goes through any helper layer.
+The pinMode/pinModeAF/etc. macros in `Inc/target.h` survive for now
+because other source files (`bldc.c`, `led.c`, `comms*.c`,
+`remote*.c`, `main.c`) still call them. They'll be inlined out of
+those files in their own ports — or deleted en bloc when target.h's
+F130 path is dismantled at the end. The firmware build remains
+broken at link time on the unported peripheral inits (watchdog,
+USART, PWM, ADC), as expected per guardrail #4.
 
 ---
 
