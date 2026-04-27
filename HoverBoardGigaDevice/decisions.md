@@ -12,6 +12,10 @@
 | 6. adc_trigger_timer_init | ✅ none needed | ⬜ no covering vector | n/a | ✅ |
 | 7. adc_init | ✅ none needed | ✅ partial (sequence + sample time) | ⬜ | ✅ |
 | ISR rename in `it.c` | n/a | n/a | n/a | ✅ |
+| timeout_timer_init | n/a (extra, not in brief) | ⬜ | n/a | ✅ |
+| usart1_init | n/a (extra, not in brief) | ⬜ | n/a | ✅ |
+| Inline pinMode/digitalWrite at all callers | n/a | n/a | n/a | ⬜ in-progress |
+| Replace SystemCoreClock + SPL types globally | n/a | n/a | n/a | ⬜ |
 | Delete lib/spl/, platformio.ini | n/a | n/a | n/a | ⬜ |
 | `make` builds firmware | n/a | n/a | n/a | ⬜ |
 
@@ -68,6 +72,67 @@ extension lands) is the operative milestone — the firmware build is
 green only at the very end. Each commit boundary should align with
 "fork + vector + decisions" trinity for one stage, not with a green
 firmware build.
+
+---
+
+## 2026-04-27 — Checkpoint after Phase 2 + ISR rename: status summary
+
+**What's done at this checkpoint** (commits in this branch since the
+foundation):
+
+1. Build infrastructure: Makefile + linker script + decisions.md.
+2. libopencm3 fork extended with RCC 72 MHz IRC8M support
+   (commit `d5f222f8` in `~/dev/c/libopencm3`).
+3. regtrace bumped to pin the new fork SHA + RCC vector validation +
+   IWDG vector validation (commits in `~/dev/regtrace`).
+4. `Src/setup.c` Phase 2 stages 1–7 ported, all macros inlined per
+   guardrail #5: `clock_init`, `gpio_init`, `watchdog_init`,
+   `usart0_init`, `pwm_init`, `adc_trigger_timer_init`, `adc_init`.
+5. Extras: `timeout_timer_init` (TIM14), `usart1_init` (USART2)
+   ported same-style.
+6. `Src/it.c` ISR handlers renamed to libopencm3 `*_isr` symbols +
+   SPL HAL calls replaced inline.
+7. `Inc/setup.h` declarations + `Src/main.c` callsites updated.
+
+**What remains** (in rough increasing-blast-radius order):
+
+- **`Inc/target.h` pinMode / pinModeAF / pinModePull / pinModeSpeed /
+  digitalWrite / digitalRead / AF_TIMER0_BLDC / AF_USART0_TX / etc.
+  macros**: still defined and used by `Src/bldc.c`, `Src/led.c`,
+  `Src/comms*.c`, `Src/remote*.c`, `Src/main.c`. Per guardrail #5
+  these need inlining at each callsite — a per-file task. The macros
+  themselves and target.h's F130 block come out at the end.
+- **TARGET_* shim macros in target.h**: `TARGET_dma_*`, `TARGET_adc_*`,
+  `TARGET_nvic_*`, `TARGET_DMA_CH*`, `TARGET_DMA_Channel*_IRQn`, etc.
+  No longer referenced after this checkpoint (setup.c + it.c don't
+  use them). Pure dead weight — go en bloc with target.h.
+- **`SystemCoreClock` global**: SPL CMSIS-defined; replace with
+  `rcc_ahb_frequency` (libopencm3) at the few callsites
+  (`Src/setup.c::timeout_timer_init`, `Src/main.c::SysTick_Config`).
+- **SPL types**: `FlagStatus`, `ErrStatus`, `RESET`, `SET`, `SUCCESS`,
+  `ERROR` — used pervasively. Replace with bool / int + literal
+  constants per the firmware's needs. Per-file pass.
+- **F103/E230 conditional code**: TARGET==2/3 sections in target.h,
+  setup.c, it.c, main.c are dead on F130 builds. Remove en bloc per
+  brief F130-only directive.
+- **`Src/setup.c` dead globals**: `timeoutTimer_paramter_struct`,
+  `timerBldc_paramter_struct`, `timerBldc_break_parameter_struct`,
+  `timerBldc_oc_parameter_struct`, `dma_init_struct_usart`,
+  `dma_init_struct_adc` — all unused now. Remove with target.h
+  cleanup.
+- **`lib/spl/`, `platformio.ini`, `add_RTT_task.py`,
+  `add_RTT_task_gd32e230.py`, `add_RTT_console.py`**: delete per
+  Done condition #1.
+- **`make clean && make` green**: verify the firmware actually
+  links. The bldc.c / led.c / comms*.c HAL calls (digitalWrite,
+  digitalRead, gpio_bit_write, etc.) need inlining first or they
+  fail at link time.
+
+The setup.c + it.c HAL surface — the brief's actual Phase 2 scope —
+is complete. The remaining work is dependency-driven inlining /
+cleanup in code outside the brief's explicit scope (but still
+inside the brief's "with `lib/spl/` deleted, the build must link
+clean" requirement).
 
 ---
 
