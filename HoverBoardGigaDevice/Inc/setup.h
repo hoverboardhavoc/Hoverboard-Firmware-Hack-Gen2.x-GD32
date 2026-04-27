@@ -39,9 +39,8 @@
 	void pinMode(uint32_t pin, uint32_t mode);
 #endif
 
-void Clock_init(void);
+void clock_init(void);
 void Clock_test(void);
-void Interrupt_init(void);	// Initializes the interrupts
 ErrStatus Watchdog_init(void);	// Initializes the watchdog
 void TimeoutTimer_init(void);	// Initializes the timeout timer
 void GPIO_init(void);	// Initializes the GPIOs

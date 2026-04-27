@@ -32,6 +32,16 @@
 #include "../Inc/defines.h"
 #include "../Inc/it.h"
 
+/* Phase 2 stage 1 (clock_init) ports against libopencm3. RCC + SCB are the
+ * only libopencm3 surfaces touched at this stage; their function-name
+ * namespaces (rcc_*, scb_*) don't collide with SPL (rcu_*) so this can
+ * coexist with the still-SPL bodies of the other init functions during
+ * the staged port. As subsequent peripherals port, more libopencm3
+ * headers are added and the corresponding SPL #include chain is
+ * removed file-wide. See decisions.md for the staging rationale. */
+#include <libopencm3/cm3/scb.h>
+#include <libopencm3/gd32/f1x0/rcc.h>
+
 #ifndef pinMode
 void pinMode(uint32_t pin, uint32_t mode)
 {
@@ -72,14 +82,10 @@ uint8_t usart2_rx_buf[1];
 dma_parameter_struct dma_init_struct_adc;
 extern adc_buf_t adc_buffer;
 
-//----------------------------------------------------------------------------
-// Initializes the interrupts
-//----------------------------------------------------------------------------
-void Interrupt_init(void)
-{
-  // Set IRQ priority configuration
-	TARGET_nvic_priority_group_set(NVIC_PRIGROUP_PRE4_SUB0);
-}
+/* Interrupt_init removed: the only thing it did — set NVIC priority
+ * grouping to PRE4_SUB0 — folded into clock_init() per brief Phase 2.
+ * Per-peripheral NVIC enables stay where they are (in each peripheral's
+ * init function). */
 
 //----------------------------------------------------------------------------
 // Initializes the watchdog
@@ -1151,64 +1157,35 @@ void ConfigRead(void)  	// made compatible for 32kB and 64kB mcu versions by Dee
 
 uint32_t dev_id = 0;		// for debugging with StmStudio (or McuViewer)
 uint32_t pll_mul = 0;		// for debugging with StmStudio (or McuViewer)
-void Clock_init(void)
+void clock_init(void)
 {
-	#if TARGET != 3		// reading DBGMCU_IDCODE on gd32e230 will call HardFault_Handler handler and while(1){} foreve
-		#define DBGMCU_IDCODE   (*(volatile uint32_t*)0xE0042000)
-		#define DEV_ID_MASK     0x00000FFF
-		#define STM32F103_DEV   0x410   // STM32F103
-		// GD32F103 will read as something else (typically 0x419)
-		dev_id = DBGMCU_IDCODE & DEV_ID_MASK;		// will be 1044 for GD32F103RC and 1040=0x410 for GD32F103C8 :-(
-		//if (dev_id == STM32F103_DEV) 	// not working 
-	#endif
-	#ifdef STM32F103
-		/* 0. SAFETY FIRST: Switch system clock back to IRC8M(HSI) if it's using the PLL */
-		/* Read the current clock source */
-		uint32_t reg = RCU_CFG0;
-		uint32_t sw = reg & 0x3;
+	/* Diagnostic: identify the silicon. GD32F130C8 reads back 0x410 in the
+	 * low 12 bits of DBGMCU_IDCODE (matches STM32F103 — vendor obfuscation).
+	 * Surfaced for StmStudio / McuViewer; not a control flow input. */
+	#define DBGMCU_IDCODE   (*(volatile uint32_t*)0xE0042000)
+	#define DEV_ID_MASK     0x00000FFF
+	dev_id = DBGMCU_IDCODE & DEV_ID_MASK;
 
-		/* If the system clock is currently sourced from the PLL... */
-		if (sw == RCU_CKSYSSRC_PLL) {
-				/* Switch it back to IRC8M(HSI) */
-				RCU_CFG0 = (reg & ~0x3) | RCU_CKSYSSRC_IRC8M; // Clear SW bits, set to IRC8M(HSI)
-				/* Wait until the switch is complete */
-				while (((RCU_CFG0 >> 2) & 0x3) != 0); // Wait for SWS to become 0 (HSI)
-		}
+	/* PLL + bus prescalers + sysclk switch in one call. Equivalent to the
+	 * GD32 SPL's __SYSTEM_CLOCK_72M_PLL_IRC8M_DIV2 path that ran from
+	 * SystemInit() before main on the SPL build. The HSI_72MHZ entry in
+	 * rcc_hsi_configs[] uses pllmul=MUL18 (PLLMF[4]+PLLMF[0]) — the wider
+	 * GD-only multiplier that STM32F1's 4-bit PLLMUL can't reach. See
+	 * vector rcc/irc8m_pll_72mhz.yaml + decisions/v0.5+/RCC.md. */
+	rcc_clock_setup_pll(&rcc_hsi_configs[RCC_CLOCK_HSI_72MHZ]);
 
-		/* Now it's safe to disable the PLL */
-		RCU_CTL &= ~RCU_CTL_PLLEN;       // Disable PLL
-		
-		/* 1. Enable internal 8 MHz oscillator (IRC8M = HSI) */
-		RCU_CTL |= RCU_CTL_IRC8MEN;
-		while((RCU_CTL & RCU_CTL_IRC8MSTB) == 0);
+	/* Folded from the deleted Interrupt_init: 4-bit pre-empt, no
+	 * sub-priority. PRIGROUP_NOSUB == SCB_AIRCR_PRIGROUP_NOSUB ==
+	 * gd-spl's NVIC_PRIGROUP_PRE4_SUB0. Runs before any peripheral's
+	 * own NVIC enable so each subsequent nvic_enable_irq sees the right
+	 * grouping. */
+	scb_set_priority_grouping(SCB_AIRCR_PRIGROUP_NOSUB);
 
-		/* 2. Configure Flash wait states for 64 MHz 
-			 (2 wait states needed for 48�72 MHz range) */
-		FMC_WS &= ~0x7;   // clear WSCNT[2:0]
-		FMC_WS |= 0x2;    // 2 wait states
-
-		/* 3. Configure PLL: IRC8M / 2 * 16 = 64 MHz */
-		RCU_CFG0 &= ~(RCU_CFG0_PLLMF | RCU_CFG0_PLLSEL);
-		RCU_CFG0 |= (RCU_PLLSRC_IRC8M_DIV2 | RCU_PLL_MUL16);
-
-		/* 4. Set prescalers: 
-					AHB = /1 (64 MHz), 
-					APB1 = /2 (32 MHz, must be =36 MHz), 
-					APB2 = /1 (64 MHz) */
-		RCU_CFG0 &= ~(RCU_CFG0_AHBPSC | RCU_CFG0_APB1PSC | RCU_CFG0_APB2PSC);
-		RCU_CFG0 |= (RCU_AHB_CKSYS_DIV1 | RCU_APB1_CKAHB_DIV2 | RCU_APB2_CKAHB_DIV1);
-
-		/* 5. Enable PLL */
-		RCU_CTL |= RCU_CTL_PLLEN;
-		while((RCU_CTL & RCU_CTL_PLLSTB) == 0);
-
-		/* 6. Switch system clock to PLL */
-		RCU_CFG0 &= ~RCU_CFG0_SCS;
-		RCU_CFG0 |= RCU_CKSYSSRC_PLL;
-		while((RCU_CFG0 & RCU_SCSS_PLL) == 0);
-	#endif
-	SystemCoreClockUpdate();
-	pll_mul = (RCU_CFG0 & RCU_CFG0_PLLMF) >> 18;  // bits differ per header, check what value you actually get		
+	/* Diagnostic: PLLMF[4:0]. After rcc_clock_setup_pll(...HSI_72MHZ) this
+	 * should read 0x11 (PLLMF[4]=1, PLLMF[3:0]=1 → MUL18). Cross-check
+	 * value in McuViewer to confirm the wide PLLMUL field landed. */
+	pll_mul = ((RCC_CFGR & RCC_CFGR_PLLMUL_0_3) >> RCC_CFGR_PLLMUL_0_3_SHIFT) |
+	          (((RCC_CFGR & RCC_CFGR_PLLMUL_4) >> RCC_CFGR_PLLMUL_4_SHIFT) << 4);
 }
 
 uint32_t iTestClock = 0;	// for debugging with StmStudio (or McuViewer)

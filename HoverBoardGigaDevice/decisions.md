@@ -1,0 +1,185 @@
+# libopencm3 port — decision log
+
+## Current checkpoint state (2026-04-27)
+
+| Phase 2 stage | Fork ext. | Vector | Trace OK | Firmware ported |
+|---|---|---|---|---|
+| 1. clock_init | ✅ rcc.h+rcc.c (MUL17..32, HSI_72MHZ) | ✅ | ✅ (decided) | ✅ |
+| 2. gpio_init | ⬜ | partial (single pin) | ⬜ | ⬜ |
+| 3. watchdog_init | ⬜ check | ✅ | ⬜ | ⬜ |
+| 4. usart0_init | ⬜ | partial | ⬜ | ⬜ |
+| 5. pwm_init | ⬜ (advanced timer) | ✅ (basic) | ⬜ | ⬜ |
+| 6. adc_trigger_timer_init | ⬜ | missing | ⬜ | ⬜ |
+| 7. adc_init | ⬜ (large) | partial | ⬜ | ⬜ |
+| ISR rename in `it.c` | n/a | n/a | n/a | ⬜ |
+| Delete lib/spl/, platformio.ini | n/a | n/a | n/a | ⬜ |
+| `make` builds firmware | n/a | n/a | n/a | ⬜ |
+
+Each row is its own multi-step sub-task (fork extension may need its
+own regtrace vector author/refresh first). The tabular layout is the
+"how far we got" snapshot — the per-stage entries below are the audit
+trail.
+
+
+
+This file records decisions taken during execution of `libopencm3_port_brief.md`
+when the brief is silent or when an unforeseen obstacle warrants a documented
+choice. Regtrace-comparator divergences live in
+`~/dev/regtrace/decisions/<version>/<PERIPHERAL>.md`, not here — this log is
+for firmware-side and build-system choices only.
+
+Format: most recent first. Each entry has an ISO date, short title,
+**Why**, **What I did**, and (if applicable) **Consequence**.
+
+---
+
+## 2026-04-27 — Pacing: complete the port in dependency order, commit per-peripheral
+
+**Why:** The brief's Phase 2 sequence (clock → gpio → watchdog → usart0 → pwm
+→ adc-trigger-timer → adc) is a strict dependency chain — each stage's
+correctness depends on the prior stage. The libopencm3/gd32-f1x0 fork's
+peripheral surface is also incomplete (only thin headers for several
+peripherals; no setup helpers; no scan/DMA wiring), so most stages will hit
+the Showstopper case at least once. Trying to land all stages in a single
+edit-then-build pass would mean a long stretch where the firmware can't link
+or trace, with no checkpoints to bisect against.
+
+**What I did:** Treat each Phase 2 stage as a self-contained sub-task:
+extend the fork (add header decls + lib body) → build the fork archive →
+author/refresh the regtrace vector for that stage's `libopencm3/gd32f1x0`
+body → port the firmware function. Build the firmware and run regtrace at
+the end of each stage. The intermediate states keep `lib/spl/` on disk so
+unported callsites still link; once every stage is ported, `lib/spl/` and
+`platformio.ini` come out per Done condition #1.
+
+**Consequence:** During the port, `Src/setup.c` cannot compile in a
+mixed state — `defines.h` pulls in SPL headers (`gd32f1x0.h`,
+`gd32f1x0_rcu.h`, etc.) for every translation unit, and SPL/libopencm3
+share namespace on `gpio_*`, `timer_*`, `adc_*`, `dma_*` (collision on
+include). The brief's escape hatch is per guardrail #4: replace each
+unported function body with `#error "<fn> not ported"` so the build
+fails loudly at the unported call site. Phase 2 then proceeds
+function-by-function, but the firmware archive only links once every
+stage in the dependency list is complete. The check is re-run at the
+end (Phase 3 + Done condition #1).
+
+This means the per-stage **regtrace** verification (run as each fork
+extension lands) is the operative milestone — the firmware build is
+green only at the very end. Each commit boundary should align with
+"fork + vector + decisions" trinity for one stage, not with a green
+firmware build.
+
+---
+
+## 2026-04-27 — Phase 2 stage 1: clock_init ported
+
+**Why:** RCC fork is now ready (entry below). The Phase 2 dependency chain
+starts here and nothing downstream gets a SystemCoreClock/rcc_ahb_frequency
+that's correct without it.
+
+**What I did:**
+1. **`Src/setup.c`**: replaced `Clock_init`'s F130 body (which was a
+   diagnostic-only stub relying on SystemInit having configured the PLL
+   before main) with `rcc_clock_setup_pll(&rcc_hsi_configs[RCC_CLOCK_HSI_72MHZ])`,
+   the libopencm3 path that produces the regtrace-validated PLL config.
+   Renamed `Clock_init` → `clock_init` (snake_case per brief).
+2. **Folded `Interrupt_init` into `clock_init`**: the priority-grouping
+   call became `scb_set_priority_grouping(SCB_AIRCR_PRIGROUP_NOSUB)` —
+   the libopencm3 spelling of NVIC_PRIGROUP_PRE4_SUB0 (4 pre-empt bits,
+   0 sub-priority bits). Deleted the `Interrupt_init` function and its
+   declaration in `setup.h`.
+3. **Diagnostic globals preserved**: `dev_id` reads DBGMCU_IDCODE; `pll_mul`
+   now reads PLLMUL via `RCC_CFGR_PLLMUL_0_3 / RCC_CFGR_PLLMUL_4` — the
+   libopencm3 spelling — so it correctly captures the wide 5-bit field
+   instead of the legacy 4-bit one. After
+   `rcc_clock_setup_pll(...HSI_72MHZ)` it should read 0x11 (MUL18).
+4. **`Src/main.c`**: callsite renamed to `clock_init()`; the
+   `Interrupt_init()` call removed (folded).
+5. **`Src/setup.c` includes `<libopencm3/cm3/scb.h>` and
+   `<libopencm3/gd32/f1x0/rcc.h>`** alongside the existing SPL umbrella.
+   Safe because libopencm3's `rcc_*` and `scb_*` namespaces don't collide
+   with SPL's `rcu_*`. Subsequent stages will need to swap collision-
+   prone headers (`gpio_*`, `timer_*`, `adc_*`, `dma_*`) and that's where
+   each follow-on stage's first job is.
+
+**Consequence:** The firmware as a whole still uses SPL for everything
+else — by design (per the staging consequence below). The `make` build
+will fail at link time on every other init function until those land.
+That's the brief's intended state per guardrail #4: loud, not silent.
+Phase 2 stage 2 (`gpio_init`) is the next concrete sub-task; it will
+need fork extensions for the GPIO v2 alternate-function helper that the
+firmware's `pinModeAF` macro currently provides via SPL.
+
+---
+
+## 2026-04-27 — RCC fork extension (Showstopper #1 resolved): 72 MHz IRC8M
+
+**Why:** Phase 2 stage 1 (`Clock_init` → `clock_init`) needs to set up the
+firmware's canonical 72 MHz IRC8M / 2 × 18 PLL. The libopencm3 GD32F1x0
+fork at `~/dev/c/libopencm3` (branch `master`, rev `d498c397`) only
+shipped 48 MHz and 64 MHz IRC8M configs; the 72 MHz one needs PLLMF[4] at
+RCU_CFG0 bit 27, which STM32F1 doesn't have. This is the predicted first
+Showstopper (per brief's "F130 risks ADC v2 / GPIO v2 gaps" + RCC.md
+decision file at `~/dev/regtrace/decisions/v0.5+/RCC.md`).
+
+**What I did:**
+1. **Fork header** (`include/libopencm3/gd32/f1x0/rcc.h`): added
+   `RCC_CFGR_PLLMUL_PLL_CLK_MUL17..MUL32` constants. The encoding has a
+   discontinuity — when PLLMF[4]=1 the low nibble restarts at 0
+   (MUL17=0x10, MUL18=0x11, …), matching the SPL macros
+   `RCU_PLL_MUL17..32` in `gd32f1x0_rcu.h`. This was *not* obvious from
+   the regtrace decisions doc — the doc misstated MUL18 as
+   `PLLMF[3:0]=0b0000 + PLLMF[4]=1`; the actual SPL trace at step [13]
+   writes `0x08040008` which is PLLMF[4]+PLLMF[0], i.e. encoding=0x11.
+   Caught this by regrep'ing `RCU_PLL_MUL18` in the GD32 SPL source —
+   first attempt at adding the constants used encoding `0x10` for
+   MUL18 and traced as 64 MHz; the fix was a 1-bit shift across all
+   added MUL constants.
+2. **Fork lib** (`lib/gd32/f1x0/rcc.c`): added a third entry to
+   `rcc_hsi_configs[]` for 72 MHz (pllmul=MUL18, hpre=NODIV, ppre1=DIV2,
+   ppre2=NODIV). New enum value `RCC_CLOCK_HSI_72MHZ` joins
+   `RCC_CLOCK_HSI_48MHZ` / `RCC_CLOCK_HSI_64MHZ` in `enum rcc_clock_hsi`.
+3. **Fork archive rebuilt:** `cd ~/dev/c/libopencm3 && make TARGETS=gd32/f1x0`.
+4. **Regtrace vector** `rcc/irc8m_pll_72mhz.yaml`: `libopencm3/gd32f1x0`
+   body now calls `rcc_clock_setup_pll(&rcc_hsi_configs[RCC_CLOCK_HSI_72MHZ])`
+   (was a placeholder calling the nonexistent 64MHz helper). Added
+   `libopencm3/cm3/common.h` to includes so `uint32_t` resolves.
+5. **`regtrace clean --libs && regtrace compare rcc_irc8m_pll_72mhz`**:
+   end state on RCU_CFG0 matches gd-spl bit-identically (0x0000000A);
+   PLLMF write at step [6] in the libopencm3 trace produces the same
+   0x08040008 the gd-spl trace produces at step [13].
+6. **`~/dev/regtrace/decisions/v0.5+/RCC.md`** updated: the predicted
+   "build leg failed" status is resolved; the 14 remaining trace-position
+   differences are decided-acceptable (gd-spl extra reset-defaults
+   writes that touch GD-only registers RCU_CFG2/CFG3/CTL1/INT;
+   piecewise vs batched RCU_CFG0 updates; explicit-zero HPRE write).
+
+**Consequence:** Phase 2 stage 1 (`clock_init`) is unblocked.
+`Src/setup.c::Clock_init` can now be ported by replacing the F130 path's
+`SystemCoreClockUpdate()`-only body (which relied on SystemInit running
+PLL setup before main) with a direct call to
+`rcc_clock_setup_pll(&rcc_hsi_configs[RCC_CLOCK_HSI_72MHZ])`. The
+`scb_set_priority_grouping(SCB_AIRCR_PRIGROUP_NOSUB)` call from the
+deleted `Interrupt_init` folds into the same function per brief.
+
+The diagnostic globals `dev_id` and `pll_mul` (`Src/setup.c:1152-1153`)
+that read `DBGMCU_IDCODE` and `RCU_CFG0_PLLMF` should be kept — they're
+McuViewer/StmStudio probes, not HAL state. They reference SPL macros for
+register addresses, which need to be re-spelled in libopencm3 terms
+(`SCS_DEMCR` / `(uint32_t*)0xE0042000` / `RCC_CFGR & RCC_CFGR_PLLMUL_*`).
+
+---
+
+## 2026-04-27 — Build system: Makefile + libopencm3 link script per brief
+
+**Why:** Brief explicitly mandates `make`, `arm-none-eabi-gcc` directly,
+linker script at `lib/libopencm3/link_gd32f130.ld`, no PIO. Just executing
+the brief.
+
+**What I did:** Wrote `HoverBoardGigaDevice/Makefile` and
+`HoverBoardGigaDevice/lib/libopencm3/link_gd32f130.ld`. The Makefile passes
+`-D GD32F1X0` and `-D STM32F1` (the latter because the fork's gd32/f1x0
+headers `#include <libopencm3/stm32/...>` for shared peripherals), links
+the fork's prebuilt archive, and includes `cortex-m-generic.ld` per the
+fork's convention. A `fork-check` target prints a pointed message if
+`libopencm3_gd32f1x0.a` is missing.
