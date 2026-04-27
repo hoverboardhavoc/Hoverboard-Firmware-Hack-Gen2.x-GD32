@@ -42,6 +42,7 @@
 #include <libopencm3/cm3/scb.h>
 #include <libopencm3/gd32/f1x0/rcc.h>
 #include <libopencm3/gd32/f1x0/gpio.h>
+#include <libopencm3/gd32/f1x0/iwdg.h>
 
 #ifndef pinMode
 void pinMode(uint32_t pin, uint32_t mode)
@@ -90,29 +91,34 @@ extern adc_buf_t adc_buffer;
 
 //----------------------------------------------------------------------------
 // Initializes the watchdog
+//
+// Phase 2 stage 3 of the libopencm3 port. iwdg_set_period_ms(2048) lands on
+// IWDG_PR=2 (=/16) and IWDG_RLR=0x0FFF — final-state-identical to the SPL
+// fwdgt_config(0x0FFF, FWDGT_PSC_DIV16) path. Verified by regtrace vector
+// iwdg/config_2sec_period.yaml in final_state mode (gd-spl/gd32f1x0 ↔
+// libopencm3/gd32f1x0 → match).
+//
+// Actual hardware timeout is LSI-frequency dependent: GD32 LSI nominal
+// 40 kHz → ~1638 ms; STM32-style nominal 32 kHz → ~2048 ms. The bit-pattern
+// in IWDG_PR/IWDG_RLR is identical either way. The window-mode write that
+// the SPL Watchdog_init issued (TARGET_fwdgt_window_value_config(0x0FFF))
+// programmed IWDG_WINR to its post-reset default of 0x0FFF — equivalent to
+// "no window," and libopencm3's iwdg_set_period_ms doesn't write WINR at
+// all, leaving the same final state.
 //----------------------------------------------------------------------------
-ErrStatus Watchdog_init(void)
+ErrStatus watchdog_init(void)
 {
-	// Check if the system has resumed from FWDGT reset
-	if (RESET != rcu_flag_get(RCU_FLAG_FWDGTRST))
-	{   
-		// FWDGTRST flag set
-		rcu_all_reset_flag_clear();
-	}
-	
-	// Clock source is IRC40K (40 kHz)
-	// Prescaler is 16
-	// Reload value is 4096 (0x0FFF)
-	// Watchdog fires after 1638.4 ms
-	if (fwdgt_config(0x0FFF, FWDGT_PSC_DIV16) != SUCCESS ||
-		TARGET_fwdgt_window_value_config(0x0FFF) != SUCCESS)
-	{
-		return ERROR;
+	// If the previous reset was caused by the IWDG firing, clear the
+	// reset-cause flags. Diagnostic only — the firmware doesn't take a
+	// different code path based on reset cause; the original Watchdog_init
+	// did this so behavior parity preserved.
+	if (RCC_CSR & RCC_CSR_IWDGRSTF) {
+		RCC_CSR |= RCC_CSR_RMVF;
 	}
 
-	// Enable free watchdog timer
-	fwdgt_enable();
-	
+	iwdg_set_period_ms(2048);
+	iwdg_start();
+
 	return SUCCESS;
 }
 

@@ -121,7 +121,7 @@ int main (void)
 	#endif
 	
 		
-	if (	Watchdog_init() == ERROR)	// Init watchdog
+	if (	watchdog_init() == ERROR)	// Init watchdog
 		while(1);	// If an error accours with watchdog initialization do not start device
 
 	/* Interrupt_init removed: NVIC priority grouping moved into clock_init().

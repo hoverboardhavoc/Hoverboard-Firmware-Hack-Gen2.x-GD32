@@ -41,7 +41,7 @@
 
 void clock_init(void);
 void Clock_test(void);
-ErrStatus Watchdog_init(void);	// Initializes the watchdog
+ErrStatus watchdog_init(void);	// Initializes the watchdog
 void TimeoutTimer_init(void);	// Initializes the timeout timer
 void gpio_init(void);	// Initializes the GPIOs
 void PWM_init(void);	// Initializes the PWM

@@ -6,7 +6,7 @@
 |---|---|---|---|---|
 | 1. clock_init | ✅ rcc.h+rcc.c (MUL17..32, HSI_72MHZ) | ✅ | ✅ (decided) | ✅ |
 | 2. gpio_init | ✅ none needed | ✅ pattern-validated (single pin) | ✅ | ✅ |
-| 3. watchdog_init | ⬜ check | ✅ | ⬜ | ⬜ |
+| 3. watchdog_init | ✅ none needed | ✅ libopencm3/gd32f1x0 leg added | ✅ match | ✅ |
 | 4. usart0_init | ⬜ | partial | ⬜ | ⬜ |
 | 5. pwm_init | ⬜ (advanced timer) | ✅ (basic) | ⬜ | ⬜ |
 | 6. adc_trigger_timer_init | ⬜ | missing | ⬜ | ⬜ |
@@ -68,6 +68,60 @@ extension lands) is the operative milestone — the firmware build is
 green only at the very end. Each commit boundary should align with
 "fork + vector + decisions" trinity for one stage, not with a green
 firmware build.
+
+---
+
+## 2026-04-27 — Phase 2 stage 3: watchdog_init ported
+
+**Why:** Phase 2 stage 3 per dependency order. The IWDG is the only
+boot-critical peripheral whose mistuning has no soft-recovery — get it
+wrong and the firmware reboots in a loop. The vector
+`vectors/iwdg/config_2sec_period.yaml` already pinned the configuration
+intent in v0.5+, but the `libopencm3/gd32f1x0` implementation leg was
+missing.
+
+**What I did:**
+
+1. **Regtrace vector**: added the `libopencm3/gd32f1x0` impl to
+   `vectors/iwdg/config_2sec_period.yaml`. Body is identical to the
+   `libopencm3/stm32f0` leg — `iwdg_set_period_ms(2048); iwdg_start();` —
+   because the fork's `gd32/f1x0/iwdg.h` forwards directly to
+   `stm32/common/iwdg_common_v2.h` (FWDGT is register-compatible with
+   STM32F0 IWDG including WINR). `regtrace compare` against `gd-spl/gd32f1x0`
+   in `final_state` mode → **match**.
+
+2. **`Src/setup.c::watchdog_init`** (formerly `Watchdog_init`):
+   - `iwdg_set_period_ms(2048) + iwdg_start()` replaces
+     `fwdgt_config(0x0FFF, FWDGT_PSC_DIV16) + fwdgt_enable`. Final
+     IWDG_PR / IWDG_RLR state is byte-identical (PR=2 = /16, RLR=0xFFF);
+     verified by the regtrace vector in `final_state` mode. The
+     `register_writes` divergence noted in the vector — libopencm3 emits
+     a RELOAD key (0xAAAA) and a duplicate START key — is benign because
+     the IWDG state machine treats them as no-ops once the counter is
+     loaded.
+   - Window-mode write dropped. SPL's `fwdgt_window_value_config(0x0FFF)`
+     programmed IWDG_WINR to its post-reset default (0x0FFF = no window).
+     `iwdg_set_period_ms` doesn't touch WINR, so the final state is the
+     same. Avoids the dependency on libopencm3's missing window helper
+     (would have been a Showstopper otherwise).
+   - Reset-cause flag check ported as a direct register read:
+     `if (RCC_CSR & RCC_CSR_IWDGRSTF) RCC_CSR |= RCC_CSR_RMVF;`. The
+     SPL `rcu_flag_get(RCU_FLAG_FWDGTRST)` + `rcu_all_reset_flag_clear()`
+     pair is two SPL helpers wrapping the same two writes; inlined in
+     libopencm3 spelling. Diagnostic-only — the firmware doesn't take
+     a different path on watchdog-reset.
+
+3. **Inlined `TARGET_fwdgt_window_value_config(...)` shim** out: the
+   F130 path of target.h had `#define TARGET_fwdgt_window_value_config(a)
+   fwdgt_window_value_config(a)` (pass-through). Per guardrail #5 the
+   shim layer goes; replaced the value with a documented "no-op the
+   write" rationale.
+
+4. **`Src/main.c`, `Inc/setup.h`**: callsite + declaration renamed
+   `Watchdog_init` → `watchdog_init`.
+
+**Vector coverage**: `vectors/iwdg/config_2sec_period.yaml` (already
+covered IWDG; added gd32f1x0 leg). `final_state` match confirmed.
 
 ---
 
