@@ -51,7 +51,7 @@ void adc_trigger_timer_init(void);	// TIM3 as slave of TIM1, drives ADC trigger 
 #endif
 
 void usart0_init(uint32_t iBaud);
-void USART1_Init(uint32_t iBaud);
+void usart1_init(uint32_t iBaud);
 void USART2_Init(uint32_t iBaud);
 void USART_MasterSlave_init(void);	// Initializes the usart master slave
 

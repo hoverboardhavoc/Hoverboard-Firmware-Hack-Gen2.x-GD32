@@ -153,7 +153,7 @@ int main (void)
 			usart0_init(USART0_BAUD);
 	#endif
 	#ifdef USART1_BAUD
-			USART1_Init(USART1_BAUD);
+			usart1_init(USART1_BAUD);
 	#endif
 	#ifdef USART2_BAUD
 			USART2_Init(USART2_BAUD);

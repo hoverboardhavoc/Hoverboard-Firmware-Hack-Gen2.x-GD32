@@ -964,94 +964,75 @@ void usart0_init(uint32_t iBaud)
 }
 
 
-void USART1_Init(uint32_t iBaud)
+//----------------------------------------------------------------------------
+// USART1 (= libopencm3 USART2) init — master/slave + steering UART. Same
+// shape as usart0_init but on a different APB bus (APB1, not APB2),
+// different DMA channel (5, not 3), different NVIC IRQ (DMA_CHANNEL4_5,
+// not DMA_CHANNEL2_3).
+//
+// Not in the brief's Phase 2 list (which only requires USART0_Init) but
+// the firmware needs it for any master/slave or steering remote build.
+//
+// AF map (GD32F130 datasheet 2.6.7): USART1 on PA2/PA3/PA14/PA15 = AF1;
+// on PA8/PB0 = AF4. Active layout (defines_2-1-20.h) uses PA2/PA3 = AF1.
+//----------------------------------------------------------------------------
+void usart1_init(uint32_t iBaud)
 {
 #ifdef HAS_USART1
 
-	#if TARGET == 2
-		//rcu_periph_clock_enable(RCU_AF);        // Alternate Function clock
-		//gpio_pin_remap_config(GPIO_USART0_REMAP, ENABLE); // JW: Remap USART0 to PB6 and PB7
-	
-		#if REMOTE_USART==1 && defined(REMOTE_UARTBUS)	// no pullup resistors with multiple boards on the UartBus - Esp32/Arduino (Serial.begin) have to setup pullups
-			#define USART1_PUPD	GPIO_MODE_AF_OD
-		#else
-			#define USART1_PUPD	GPIO_MODE_AF_PP
-		#endif
-		pinModeSpeed(USART1_TX, USART1_PUPD, GPIO_OSPEED_50MHZ);	// // GD32F130: GPIO_AF_1 = USART
-		pinModeSpeed(USART1_RX, GPIO_MODE_IN_FLOATING, GPIO_OSPEED_50MHZ);	
+	#if REMOTE_USART==1 && defined(REMOTE_UARTBUS)
+		#define USART1_PUPD GPIO_PUPD_NONE
 	#else
-		#if REMOTE_USART==1 && defined(REMOTE_UARTBUS)	// no pullup resistors with multiple boards on the UartBus - Esp32/Arduino (Serial.begin) have to setup pullups
-			#define USART1_PUPD	GPIO_PUPD_NONE
-		#else
-			#define USART1_PUPD	GPIO_PUPD_PULLUP
-		#endif
-		pinModeAF(USART1_TX, AF_USART1_TX, USART1_PUPD, GPIO_OSPEED_50MHZ);	// // GD32F130: GPIO_AF_1 = USART
-		pinModeAF(USART1_RX, AF_USART1_RX, USART1_PUPD, GPIO_OSPEED_50MHZ);	
+		#define USART1_PUPD GPIO_PUPD_PULLUP
 	#endif
-	//gpio_mode_set(USART1_TX_PORT , GPIO_MODE_AF, GPIO_PUPD_PULLUP, USART1_TX_PIN);	
-	//gpio_mode_set(USART1_RX_PORT , GPIO_MODE_AF, GPIO_PUPD_PULLUP, USART1_RX_PIN);
-	//gpio_output_options_set(USART1_TX_PORT, GPIO_OTYPE_PP, GPIO_OSPEED_50MHZ, USART1_TX_PIN);
-	//gpio_output_options_set(USART1_RX_PORT, GPIO_OTYPE_PP, GPIO_OSPEED_50MHZ, USART1_RX_PIN);	
-	//gpio_af_set(USART1_TX_PORT, GPIO_AF_1, USART1_TX_PIN);	// GD32F130: GPIO_AF_1 = USART
-	//gpio_af_set(USART1_RX_PORT, GPIO_AF_1, USART1_RX_PIN);
-	
-	
-	// Enable ADC and DMA clock
-	rcu_periph_clock_enable(RCU_USART1);
-	rcu_periph_clock_enable(RCU_DMA);
-	
-	// Init USART for 115200 baud, 8N1
-	usart_baudrate_set(USART1, iBaud);
-	usart_parity_config(USART1, USART_PM_NONE);
-	usart_word_length_set(USART1, USART_WL_8BIT);
-	usart_stop_bit_set(USART1, USART_STB_1BIT);
-	#if TARGET == 2	// robo: 2 NOT_NEEDED
-		usart_hardware_flow_rts_config(USART1, USART_RTS_DISABLE);  // JW: Disable RTS
-		usart_hardware_flow_cts_config(USART1, USART_CTS_DISABLE);  // JW: Disable CTS
-	#else
-		TARGET_usart_oversample_config(USART1, USART_OVSMOD_16);
-	#endif
-	
-	// Enable both transmitter and receiver
-	usart_transmit_config(USART1, USART_TRANSMIT_ENABLE);
-	usart_receive_config(USART1, USART_RECEIVE_ENABLE);
-	
-	//syscfg_dma_remap_enable(SYSCFG_DMA_REMAP_USART0RX|SYSCFG_DMA_REMAP_USART0TX);
 
-	// Enable USART
-	usart_enable(USART1);
-	
-	// Interrupt channel 3/4 enable
-	TARGET_nvic_irq_enable(TARGET_DMA_Channel3_4_IRQn, 2, 0);		// usart irqs can not interrupt 0=bldc/hall or 1=adc/CalculateBldc
-	
-	// Initialize DMA channel 4 for USART_SLAVE RX
-	TARGET_dma_deinit(TARGET_DMA_CH4);
-	dma_init_struct_usart.direction = DMA_PERIPHERAL_TO_MEMORY;
-	dma_init_struct_usart.memory_addr = (uint32_t)usart1_rx_buf;
-	dma_init_struct_usart.memory_inc = DMA_MEMORY_INCREASE_ENABLE;
-	dma_init_struct_usart.memory_width = DMA_MEMORY_WIDTH_8BIT;
-	dma_init_struct_usart.number = 1;
-	dma_init_struct_usart.periph_addr = USART1_DATA_RX_ADDRESS;
-	dma_init_struct_usart.periph_inc = DMA_PERIPH_INCREASE_DISABLE;
-	dma_init_struct_usart.periph_width = DMA_PERIPHERAL_WIDTH_8BIT;
-	dma_init_struct_usart.priority = DMA_PRIORITY_ULTRA_HIGH;
-	TARGET_dma_init(TARGET_DMA_CH4, &dma_init_struct_usart);
-	
-	// Configure DMA mode
-	TARGET_dma_circulation_enable(TARGET_DMA_CH4);
-	TARGET_dma_memory_to_memory_disable(TARGET_DMA_CH4);
+	gpio_mode_setup(USART1_TX & 0xffffff00U, GPIO_MODE_AF, USART1_PUPD,
+			1U << (USART1_TX & 0xfU));
+	gpio_set_output_options(USART1_TX & 0xffffff00U, GPIO_OTYPE_PP,
+			GPIO_OSPEED_HIGH, 1U << (USART1_TX & 0xfU));
+	gpio_set_af(USART1_TX & 0xffffff00U,
+			(USART1_TX == PA8) ? GPIO_AF4 : GPIO_AF1,
+			1U << (USART1_TX & 0xfU));
 
-	// USART DMA enable for transmission and receive
-	usart_dma_receive_config(USART1, USART_DENR_ENABLE);
-	
-	// Enable DMA transfer complete interrupt
-	TARGET_dma_interrupt_enable(TARGET_DMA_CH4, DMA_CHXCTL_FTFIE);
-	
-	// At least clear number of remaining data to be transferred by the DMA 
-	TARGET_dma_transfer_number_config(TARGET_DMA_CH4, 1);
-	
-	// Enable dma receive channel
-	TARGET_dma_channel_enable(TARGET_DMA_CH4);
+	gpio_mode_setup(USART1_RX & 0xffffff00U, GPIO_MODE_AF, USART1_PUPD,
+			1U << (USART1_RX & 0xfU));
+	gpio_set_output_options(USART1_RX & 0xffffff00U, GPIO_OTYPE_PP,
+			GPIO_OSPEED_HIGH, 1U << (USART1_RX & 0xfU));
+	gpio_set_af(USART1_RX & 0xffffff00U,
+			(USART1_RX == PB0) ? GPIO_AF4 : GPIO_AF1,
+			1U << (USART1_RX & 0xfU));
+
+	rcc_periph_clock_enable(RCC_USART2);  // GD USART1 = libopencm3 USART2 (APB1[17])
+	rcc_periph_clock_enable(RCC_DMA);
+
+	usart_disable(USART2);
+	usart_set_baudrate(USART2, iBaud);
+	usart_set_databits(USART2, 8);
+	usart_set_stopbits(USART2, USART_STOPBITS_1);
+	usart_set_parity(USART2, USART_PARITY_NONE);
+	usart_set_mode(USART2, USART_MODE_TX_RX);
+	usart_set_flow_control(USART2, USART_FLOWCONTROL_NONE);
+	usart_enable(USART2);
+
+	nvic_set_priority(NVIC_DMA_CHANNEL4_5_IRQ, 2 << 4);
+	nvic_enable_irq(NVIC_DMA_CHANNEL4_5_IRQ);
+
+	dma_channel_reset(DMA1, DMA_CHANNEL5);
+	dma_set_peripheral_address(DMA1, DMA_CHANNEL5, (uint32_t)&USART_RDR(USART2));
+	dma_set_memory_address(DMA1, DMA_CHANNEL5, (uint32_t)usart1_rx_buf);
+	dma_set_number_of_data(DMA1, DMA_CHANNEL5, 1);
+	dma_set_read_from_peripheral(DMA1, DMA_CHANNEL5);
+	dma_disable_peripheral_increment_mode(DMA1, DMA_CHANNEL5);
+	dma_enable_memory_increment_mode(DMA1, DMA_CHANNEL5);
+	dma_set_peripheral_size(DMA1, DMA_CHANNEL5, DMA_CCR_PSIZE_8BIT);
+	dma_set_memory_size(DMA1, DMA_CHANNEL5, DMA_CCR_MSIZE_8BIT);
+	dma_set_priority(DMA1, DMA_CHANNEL5, DMA_CCR_PL_VERY_HIGH);
+	dma_enable_circular_mode(DMA1, DMA_CHANNEL5);
+
+	usart_enable_rx_dma(USART2);
+	dma_enable_transfer_complete_interrupt(DMA1, DMA_CHANNEL5);
+	dma_enable_channel(DMA1, DMA_CHANNEL5);
+
 #endif
 }
 
