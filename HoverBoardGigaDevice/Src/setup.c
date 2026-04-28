@@ -501,7 +501,17 @@ void pwm_init(void)
 	for (int i = 0; i < 3; i++) {
 		timer_set_oc_slow_mode(TIM1, ocs[i]);          // OCxFE = 0 (fast off)
 		timer_disable_oc_preload(TIM1, ocs[i]);        // OCxPE = 0 (shadow off)
-		timer_set_oc_mode(TIM1, ocs[i], TIM_OCM_PWM1);
+		/* libopencm3 TIM_OCM_PWM2 (bit pattern 0b111) ↔ gd-spl
+		 * TIMER_OC_MODE_PWM1 — naming inverted between libraries. The
+		 * GD32 RM "PWM mode 1" (output LOW when CNT<CCR while
+		 * counting up) is libopencm3's "PWM mode 2"; libopencm3's
+		 * PWM mode 1 (output HIGH when CNT<CCR while counting up) is
+		 * GD's "PWM mode 0". The firmware intent is the original
+		 * gd-spl PWM mode 1 = bit pattern 0b111, so libopencm3
+		 * spelling is TIM_OCM_PWM2. Verified bit-identical against
+		 * gd-spl trace at <TIM1_BASE>+0x18 in regtrace vector
+		 * timer/slave_restart_oc1ref_trgo. */
+		timer_set_oc_mode(TIM1, ocs[i], TIM_OCM_PWM2);
 		timer_set_oc_value(TIM1, ocs[i], 0);           // start at duty=0
 		timer_set_oc_polarity_high(TIM1, ocs[i]);
 		timer_set_oc_polarity_low(TIM1, ocns[i]);
@@ -620,7 +630,9 @@ void adc_trigger_timer_init(void)
 	// Output pin disabled — we only need the internal OC1REF for the
 	// trigger; nothing routed to the package.
 	timer_disable_oc_output(TIM3, TIM_OC1);
-	timer_set_oc_mode(TIM3, TIM_OC1, TIM_OCM_PWM1);
+	/* TIM_OCM_PWM2 (= bit pattern 0b111) ↔ gd-spl TIMER_OC_MODE_PWM1.
+	 * Naming inverted; see pwm_init for full rationale. */
+	timer_set_oc_mode(TIM3, TIM_OC1, TIM_OCM_PWM2);
 	timer_set_oc_value(TIM3, TIM_OC1, FOC_SAMPLE_OFFSET_TICKS);
 
 	// TRGO source = OC1REF (MMS = COMPARE_OC1REF = 0b100). Maps to SPL's
