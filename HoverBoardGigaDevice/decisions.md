@@ -8,9 +8,9 @@
 | 2. gpio_init | ✅ none needed | ✅ pattern-validated (single pin) | ✅ | ✅ |
 | 3. watchdog_init | ✅ none needed | ✅ libopencm3/gd32f1x0 leg added | ✅ match | ✅ |
 | 4. usart0_init | ✅ none needed | ✅ existing usart+dma legs | ✅ benign CR3=0 | ✅ |
-| 5. pwm_init | ✅ none needed | ✅ basic-init covered, output/break per-call mapped | ⬜ partial vector | ✅ |
-| 6. adc_trigger_timer_init | ✅ none needed | ⬜ no covering vector | n/a | ✅ |
-| 7. adc_init | ✅ none needed | ✅ partial (sequence + sample time) | ⬜ | ✅ |
+| 5. pwm_init | ✅ none needed | ✅ basic-init covered + slave_restart vector for OC mode | ✅ decided in v0.5+/TIMER.md | ✅ |
+| 6. adc_trigger_timer_init | ✅ none needed | ✅ slave_restart_oc1ref_trgo authored | ✅ decided in v0.5+/TIMER.md | ✅ |
+| 7. adc_init | ✅ none needed | ✅ scan_dma_circular_t3trgo authored | ✅ decided in v0.5+/ADC.md | ✅ |
 | ISR rename in `it.c` | n/a | n/a | n/a | ✅ |
 | timeout_timer_init | n/a (extra, not in brief) | ⬜ | n/a | ✅ |
 | usart1_init | n/a (extra, not in brief) | ⬜ | n/a | ✅ |
@@ -18,6 +18,7 @@
 | SystemCoreClock alias + SPL type enums | n/a | n/a | n/a | ✅ |
 | Delete lib/spl/, platformio.ini, PIO scripts | n/a | n/a | n/a | ✅ |
 | `make` builds firmware | n/a | n/a | n/a | **✅** |
+| Phase 3 regtrace compare for every Phase 2 fn | n/a | n/a | **✅** all decided | **✅** |
 
 Each row is its own multi-step sub-task (fork extension may need its
 own regtrace vector author/refresh first). The tabular layout is the
@@ -72,6 +73,76 @@ extension lands) is the operative milestone — the firmware build is
 green only at the very end. Each commit boundary should align with
 "fork + vector + decisions" trinity for one stage, not with a green
 firmware build.
+
+---
+
+## 2026-04-28 — Done condition #2 (Phase 3 regtrace verification) complete
+
+Every Phase 2 setup function now has a regtrace vector pair where the
+`libopencm3/gd32f1x0` body and the `gd-spl/gd32f1x0` body either trace
+identically or have the divergence recorded as decided-acceptable in
+`~/dev/regtrace/decisions/<version>/<PERIPHERAL>.md`.
+
+**Phase 3 outcome per stage:**
+
+| Function | Vector(s) | Compare result |
+|---|---|---|
+| clock_init | `rcc/irc8m_pll_72mhz` | divergent 14 → decided `v0.5+/RCC.md` |
+| gpio_init | `gpio/output_pa5_pp_50mhz` | **match** |
+| watchdog_init | `iwdg/config_2sec_period` | **match** |
+| usart0_init | `usart/init_115200_8n1` + `dma_transmit_enable` + `rx_interrupt_enable` | 1 benign CR3=0 → decided `v0.2/USART.md`; transmit/rx → match |
+| pwm_init | `timer/pwm_init_center_aligned_16khz` + `slave_restart_oc1ref_trgo` | match + 2 → decided `v0.5+/TIMER.md` |
+| adc_trigger_timer_init | `timer/slave_restart_oc1ref_trgo` | 2 → decided `v0.5+/TIMER.md` |
+| adc_init | `adc/calibration_enable` + `single_channel_right_aligned` + `scan_dma_circular_t3trgo` + `dma/transfer_complete_irq` | 4+5+4 → decided `v0.5+/ADC.md`; tcif → match |
+| flash helpers | `flash/page_erase` + `flash/word_write` | 8+8 → decided `v0.5+/FLASH.md` |
+
+**Headline finding from Phase 3** (firmware bug caught pre-bench):
+
+The `slave_restart_oc1ref_trgo` vector surfaced an off-by-one between
+SPL and libopencm3 PWM-mode naming. SPL `TIMER_OC_MODE_PWM1` writes
+bit pattern `0b111` to OCxM[2:0] (= GD32 RM PWM mode 1 = "output low
+when CNT < CCR while counting up"). libopencm3 `TIM_OCM_PWM1` writes
+bit pattern `0b110` (= libopencm3's own PWM mode 1 = "output high when
+CNT < CCR" = GD's PWM mode 0). The libraries number from opposite ends
+of the field.
+
+The naive port `TIMER_OC_MODE_PWM1 → TIM_OCM_PWM1` flips output
+polarity. Caught at trace step `<TIM3_BASE>+0x18` showing `0x70` vs
+`0x60`. Fixed by switching to `TIM_OCM_PWM2` in the firmware
+(`commit da78dc7`); recorded as a port-time gotcha in
+`decisions/v0.5+/TIMER.md`.
+
+**Vectors authored this session:**
+- `vectors/timer/slave_restart_oc1ref_trgo.yaml` — TIM3 slave on ITR0
+  + master-output OC1REF (was missing).
+- `vectors/adc/scan_dma_circular_t3trgo.yaml` — 3-channel scan + DMA
+  + EXT trigger TIM3_TRGO (was missing).
+- `libopencm3/gd32f1x0` legs added to 6 existing vectors that were
+  missing them: `usart/dma_transmit_enable`, `usart/rx_interrupt_enable`,
+  `adc/calibration_enable`, `adc/single_channel_right_aligned`,
+  `dma/m2m_8bit`, `dma/transfer_complete_irq`.
+
+**Decision files written/updated:**
+- `decisions/v0.5+/TIMER.md` (new) — confirms share decision from
+  v0.5; documents PWM-mode naming inversion as the port-time bug-finder.
+- `decisions/v0.5+/ADC.md` (new) — confirms share-with-stm32f1
+  decision from v0.2; records the four divergence classes (calibration
+  polling, sample-time-on-all-channels for unused channels, explicit-
+  zero writes, two-step trigger preserved).
+- `decisions/v0.5+/RCC.md` (existing, updated mid-session) — 72 MHz
+  HSI helper landed; 14 SystemInit-reset divergences decided-acceptable.
+- `decisions/v0.5+/FLASH.md` (existing) — 8 register_writes-mode
+  sequencing diffs decided-acceptable.
+- `decisions/v0.2/USART.md` (existing) — single CR3=0 explicit-clear
+  decided-acceptable.
+
+**Status: brief done.** All three Done conditions satisfied:
+- #1 `make` builds clean against the libopencm3 fork
+- #2 every Phase 2 function has a regtrace-validated vector
+- #3 ISR symbols resolve to libopencm3 vector slots (no silent fallback
+  for any enabled IRQ line)
+
+Bench validation is the next step — separate effort per the brief.
 
 ---
 
