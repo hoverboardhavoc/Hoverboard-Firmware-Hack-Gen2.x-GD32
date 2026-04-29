@@ -1,187 +1,82 @@
-##########################################################################################################################
-# Makefile for Hoverboard-Firmware-Hack-Gen2.x-GD32
-##########################################################################################################################
+PROJECT  = firmware
+BUILD    = build
 
-# 1. Target-Nummer aus Inc/defines.h auslesen (ohne Raute im Befehl, um Make-Kommentare zu vermeiden)
-TARGET_NUM := $(shell grep -E 'define[ \t]+TARGET[ \t]+[0-9]+' Inc/defines.h | awk '{print $$3}' | tr -d '\r')
+LIBOPENCM3 = libopencm3
+LIBOPENCM3_ARCHIVE = $(LIBOPENCM3)/lib/libopencm3_gd32f1x0.a
+LIBOPENCM3_TARGET = gd32/f1x0
+LDSCRIPT = lib/libopencm3/link_gd32f130.ld
 
-# 2. Nummer in den passenden Chip-Namen übersetzen
-ifeq ($(TARGET_NUM), 1)
-  TARGET = GD32F130
-else ifeq ($(TARGET_NUM), 3)
-  TARGET = GD32E230
-else
-  # Default (Fallback für 2 oder falls nichts gefunden wird)
-  TARGET = GD32F103
-endif
+CROSS    = arm-none-eabi-
+CC       = $(CROSS)gcc
+OBJCOPY  = $(CROSS)objcopy
+SIZE     = $(CROSS)size
 
-# Temporärer Ordner für die Objektdateien (.o)
-BUILD_DIR = build/$(TARGET)
+CPUFLAGS = -mcpu=cortex-m3 -mthumb
+# GD32F1X0 selects the fork's gd32/f1x0 family in libopencm3's stm32/<peripheral>.h
+# dispatchers — those pull in stm32/f0/<peripheral>.h for v2 GPIO/ADC/etc. Don't
+# also define STM32F1 here: that's v1 GPIO/etc. and would win the dispatcher
+# #elif chain over GD32F1X0, routing to the wrong family.
+# TARGET=1 selects the GD32F130 path through Inc/target.h and the active
+# Inc/defines/defines_2-1-${LAYOUT}.h pin map.
+DEFS     = -D GD32F1X0 -D GD32F130 -D TARGET=1
+WARNINGS = -Wall -Wextra -Wno-unused-parameter -Wno-unused-function \
+           -Wno-unused-variable -Wno-unused-but-set-variable \
+           -Wno-missing-field-initializers
+INCLUDES = -I Inc -I $(LIBOPENCM3)/include
+OPT      = -Os -ffunction-sections -fdata-sections -fno-common
+CFLAGS   = $(CPUFLAGS) $(DEFS) $(WARNINGS) $(INCLUDES) $(OPT) -std=gnu11 -g3
+LDFLAGS  = $(CPUFLAGS) -nostartfiles \
+           -L $(LIBOPENCM3)/lib -T $(LDSCRIPT) \
+           -Wl,--gc-sections -Wl,-Map=$(BUILD)/$(PROJECT).map \
+           --specs=nosys.specs --specs=nano.specs
+LIBS     = -l:libopencm3_gd32f1x0.a
 
-# Keep debug information in the ELF by default so online-compiler builds can be
-# inspected with tools such as STMStudio. The generated .bin/.hex files are still
-# stripped by objcopy and remain suitable for flashing. Use `make DEBUG=0` for a
-# smaller ELF without debug sections.
-DEBUG ?= 1
+SRCS := $(wildcard Src/*.c)
+OBJS := $(patsubst Src/%.c,$(BUILD)/%.o,$(SRCS))
+DEPS := $(OBJS:.o=.d)
 
-ifeq ($(TARGET), GD32E230)
-  CPU = -mcpu=cortex-m23
-else
-  CPU = -mcpu=cortex-m3
-endif
+# OpenOCD config for flashing.
+#   tool-openocd (generic) — works correctly on GD32F130.
+# Override on the command line if openocd isn't on PATH or you want to use
+# a specific build, e.g. `make flash OPENOCD=$HOME/.platformio/packages/tool-openocd/bin/openocd`.
+# Do NOT point this at PlatformIO's `tool-openocd-gd32` — it silently mis-
+# programs flash on GD32F130 (vector-table bytes diverge from the .bin
+# even though "Verify" reports OK).
+OPENOCD      ?= openocd
+OPENOCD_FLAGS = -f interface/stlink.cfg \
+                -c "transport select hla_swd" -f target/stm32f1x.cfg
 
-MCU = $(CPU) -mthumb
+.PHONY: all clean flash
 
-######################################
-# Compiler-Flags (C_DEFS) & Framework-Paths
-######################################
+all: $(BUILD)/$(PROJECT).bin
 
-C_DEFS = \
--D$(TARGET) \
--DUSE_STDPERIPH_DRIVER \
--D__PIO_DONT_SET_CLOCK_SOURCE__ \
--DSEGGER_RTT_MODE_DEFAULT=SEGGER_RTT_MODE_NO_BLOCK_SKIP \
--DSEGGER_RTT_SECTION=\".rtt\" \
--DSEGGER_RTT_BUFFER_SECTION=\".rtt\"
+flash: $(BUILD)/$(PROJECT).elf
+	@pkill -f openocd 2>/dev/null; sleep 0.3; \
+	$(OPENOCD) $(OPENOCD_FLAGS) -c "program $< verify reset exit"
 
-ifeq ($(TARGET), GD32F103)
-  SPL_DIR = gd32f10x
-  C_DEFS += -DTARGET=2 -D__SYSTEM_CLOCK_72M_PLL_IRC8M=72000000 -DGD32F10X_MD
-  CFLAGS_EXTRA = -Wno-unused-function
-  LDFLAGS_EXTRA = -Wl,--undefined=SystemCoreClock
-else ifeq ($(TARGET), GD32F130)
-  SPL_DIR = gd32f1x0
-  C_DEFS += -DTARGET=1 -D__SYSTEM_CLOCK_72M_PLL_IRC8M_DIV2=72000000UL -DGD32F130_150
-  CFLAGS_EXTRA = 
-  LDFLAGS_EXTRA = 
-else ifeq ($(TARGET), GD32E230)
-  SPL_DIR = gd32e23x
-  C_DEFS += -DTARGET=3 -D__SYSTEM_CLOCK_72M_PLL_IRC8M_DIV2=72000000UL
-  CFLAGS_EXTRA = 
-  LDFLAGS_EXTRA = 
-endif
+# Build the libopencm3 archive on demand. The archive is a real prereq of
+# the firmware elf so this fires automatically on first build.
+$(LIBOPENCM3_ARCHIVE):
+	@test -f $(LIBOPENCM3)/Makefile || { \
+	  echo "error: libopencm3 submodule not initialized." ; \
+	  echo "       run: git submodule update --init --recursive" ; \
+	  exit 1 ; }
+	$(MAKE) -C $(LIBOPENCM3) TARGETS=$(LIBOPENCM3_TARGET)
 
-######################################
-# C-Sources and Includes
-######################################
-C_SOURCES = \
-$(wildcard Src/*.c) \
-$(wildcard lib/framework/gd32/spl/variants/$(SPL_DIR)/src/*.c) \
-$(wildcard lib/framework/gd32/cmsis/variants/$(SPL_DIR)/*.c)
+$(BUILD):
+	@mkdir -p $@
 
-C_INCLUDES = \
--IInc \
--Ilib/framework/gd32/cmsis/cores/gd32 \
--Ilib/framework/gd32/cmsis/variants/$(SPL_DIR) \
--Ilib/framework/gd32/spl/variants/$(SPL_DIR)/inc
+$(BUILD)/%.o: Src/%.c | $(BUILD) $(LIBOPENCM3_ARCHIVE)
+	$(CC) $(CFLAGS) -MMD -MP -c -o $@ $<
 
-CONFIG_HEADERS = \
-$(wildcard Inc/*.h) \
-$(wildcard Inc/defines/*.h) \
-$(wildcard Src/*.h)
+$(BUILD)/$(PROJECT).elf: $(OBJS) $(LIBOPENCM3_ARCHIVE) $(LDSCRIPT)
+	$(CC) $(LDFLAGS) -o $@ $(OBJS) $(LIBS)
+	$(SIZE) $@
 
-OPT = -O2
-#OPT = -Os
-
-DEBUG_FLAGS =
-
-ifeq ($(DEBUG), 1)
-DEBUG_FLAGS = -g3 -gdwarf-2
-endif
-
-CFLAGS = $(MCU) $(C_DEFS) $(C_INCLUDES) $(OPT) $(DEBUG_FLAGS) -Wall -fdata-sections -ffunction-sections $(CFLAGS_EXTRA)
-
-######################################
-# Linker & Startup
-######################################
-LDSCRIPT = lib/spl/gd32f1x0/gd32f1x0.ld
-ASM_SOURCES = lib/startup_$(TARGET).s
-
-AS_DEFS = 
-AS_INCLUDES = 
-ASFLAGS = $(MCU) $(AS_DEFS) $(AS_INCLUDES) $(OPT) $(DEBUG_FLAGS) -Wall -fdata-sections -ffunction-sections
-
-LIBS = -lc -lm -lnosys 
-#LDFLAGS = $(MCU) -specs=nano.specs -T$(LDSCRIPT) $(LIBS) -Wl,-Map=$(BUILD_DIR)/$(TARGET).map,--cref -Wl,--gc-sections -Wl,-u,_printf_float $(LDFLAGS_EXTRA)
-LDFLAGS = $(MCU) -specs=nano.specs -T$(LDSCRIPT) $(LIBS) -Wl,-Map=$(BUILD_DIR)/$(TARGET).map,--cref -Wl,--gc-sections $(LDFLAGS_EXTRA)
-
-######################################
-# Toolchain
-######################################
-PREFIX = arm-none-eabi-
-CC = $(PREFIX)gcc
-AS = $(PREFIX)gcc -x assembler-with-cpp
-CP = $(PREFIX)objcopy
-NM = $(PREFIX)nm
-SZ = $(PREFIX)size
-HEX = $(CP) -O ihex
-BIN = $(CP) -O binary -S
- 
-######################################
-# Build Rules
-######################################
-
-# .PHONY sagt Make, dass das keine Dateien, sondern echte Befehle sind
-.PHONY: all clean patch_framework
-
-all: patch_framework $(BUILD_DIR)/$(TARGET).elf $(BUILD_DIR)/$(TARGET).hex $(BUILD_DIR)/$(TARGET).bin
-
-OBJECTS = $(addprefix $(BUILD_DIR)/,$(notdir $(C_SOURCES:.c=.o)))
-vpath %.c $(sort $(dir $(C_SOURCES)))
-
-$(BUILD_DIR)/%.o: %.c Makefile $(CONFIG_HEADERS) | $(BUILD_DIR) 
-	@echo "Compiling $< ..."
-	@$(CC) -c $(CFLAGS) -MMD -MP -MF $(BUILD_DIR)/$(notdir $(<:.c=.d)) -Wa,-a,-ad,-alms=$(BUILD_DIR)/$(notdir $(<:.c=.lst)) $< -o $@
-
-OBJECTS += $(addprefix $(BUILD_DIR)/,$(notdir $(ASM_SOURCES:.s=.o)))
-vpath %.s $(sort $(dir $(ASM_SOURCES)))
-
-$(BUILD_DIR)/%.o: %.s Makefile | $(BUILD_DIR)
-	@echo "Assembling $< ..."
-	@$(AS) -c $(ASFLAGS) $< -o $@
-
-$(BUILD_DIR)/$(TARGET).elf: $(OBJECTS) Makefile | $(BUILD_DIR)
-	@echo "Linking $@ ..."
-	@$(CC) $(OBJECTS) $(LDFLAGS) -o $@
-	@$(SZ) $@
-	@cp $@ build/$(TARGET).elf
-	@cp $(BUILD_DIR)/$(TARGET).map build/$(TARGET).map
-	@$(NM) -n $@ > build/$(TARGET).sym
-
-$(BUILD_DIR)/%.hex: $(BUILD_DIR)/%.elf | $(BUILD_DIR)
-	@$(HEX) $< $@
-	@cp $@ build/$(TARGET).hex
-	
-$(BUILD_DIR)/%.bin: $(BUILD_DIR)/%.elf | $(BUILD_DIR)
-	@$(BIN) $< $@	
-	@cp $@ build/$(TARGET).bin
-	@echo "Success! Binaries copied to build/ directory"
-
-$(BUILD_DIR):
-	mkdir -p $@		
-
-
-# This patch runs always, but only applies '//' if missing
-patch_framework:
-	@echo "Patching framework clocks to use internal oscillator (IRC8M)..."
-	@# GD32F103 Patch
-	@if [ -f lib/framework/gd32/cmsis/variants/gd32f10x/system_gd32f10x.c ]; then \
-		sed -i 's/^[ \t]*#define __SYSTEM_CLOCK_108M_PLL_HXTAL/\/\/#define __SYSTEM_CLOCK_108M_PLL_HXTAL/g' lib/framework/gd32/cmsis/variants/gd32f10x/system_gd32f10x.c; \
-		sed -i 's/^[ \t]*#define __SYSTEM_CLOCK_72M_PLL_HXTAL/\/\/#define __SYSTEM_CLOCK_72M_PLL_HXTAL/g' lib/framework/gd32/cmsis/variants/gd32f10x/system_gd32f10x.c; \
-	fi
-	@# GD32F130 Patch
-	@if [ -f lib/framework/gd32/cmsis/variants/gd32f1x0/system_gd32f1x0.c ]; then \
-		sed -i 's/^[ \t]*#define __SYSTEM_CLOCK_72M_PLL_HXTAL/\/\/#define __SYSTEM_CLOCK_72M_PLL_HXTAL/g' lib/framework/gd32/cmsis/variants/gd32f1x0/system_gd32f1x0.c; \
-	fi
-	@# GD32E230 Patch
-	@if [ -f lib/framework/gd32/cmsis/variants/gd32e23x/system_gd32e23x.c ]; then \
-		sed -i 's/^[ \t]*#define __SYSTEM_CLOCK_72M_PLL_HXTAL/\/\/#define __SYSTEM_CLOCK_72M_PLL_HXTAL/g' lib/framework/gd32/cmsis/variants/gd32e23x/system_gd32e23x.c; \
-	fi
+$(BUILD)/$(PROJECT).bin: $(BUILD)/$(PROJECT).elf
+	$(OBJCOPY) -O binary $< $@
 
 clean:
-	-rm -fR build
+	rm -rf $(BUILD)
 
-######################################
-# Dependencies
-######################################
--include $(wildcard $(BUILD_DIR)/*.d)
+-include $(DEPS)

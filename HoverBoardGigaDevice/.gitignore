@@ -3,3 +3,14 @@
 .vscode/c_cpp_properties.json
 .vscode/launch.json
 .vscode/ipch
+
+# libopencm3 port build artifacts
+build/
+build-*/
+*.o
+*.d
+*.elf
+*.bin
+*.hex
+*.map
+subprojects/.wraplock

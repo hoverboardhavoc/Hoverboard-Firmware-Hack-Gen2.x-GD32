@@ -41,8 +41,8 @@ void SendBuffer(uint32_t usart_periph, uint8_t buffer[], uint8_t length)
 	
 	for(; index < length; index++)
 	{
-    usart_data_transmit(usart_periph, buffer[index]);
-    while (usart_flag_get(usart_periph, USART_FLAG_TC) == RESET) {}
+    usart_send(usart_periph, buffer[index]);
+    while (usart_get_flag(usart_periph, USART_FLAG_TC) == RESET) {}
 	}
 }
 

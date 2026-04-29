@@ -39,17 +39,19 @@
 	void pinMode(uint32_t pin, uint32_t mode);
 #endif
 
-void Clock_init(void);
+void clock_init(void);
 void Clock_test(void);
-void Interrupt_init(void);	// Initializes the interrupts
-ErrStatus Watchdog_init(void);	// Initializes the watchdog
-void TimeoutTimer_init(void);	// Initializes the timeout timer
-void GPIO_init(void);	// Initializes the GPIOs
-void PWM_init(void);	// Initializes the PWM
-void ADC_init(void);	// Initializes the ADC
+ErrStatus watchdog_init(void);	// Initializes the watchdog
+void timeout_timer_init(void);	// Initializes the timeout timer
+void gpio_init(void);	// Initializes the GPIOs
+void pwm_init(void);	// Initializes the PWM
+void adc_init(void);	// Initializes the ADC
+#if defined(PHASE_CURRENT_A) && defined(PHASE_CURRENT_B)
+void adc_trigger_timer_init(void);	// TIM3 as slave of TIM1, drives ADC trigger at a fixed offset past the PWM valley
+#endif
 
-void USART0_Init(uint32_t iBaud);
-void USART1_Init(uint32_t iBaud);
+void usart0_init(uint32_t iBaud);
+void usart1_init(uint32_t iBaud);
 void USART2_Init(uint32_t iBaud);
 void USART_MasterSlave_init(void);	// Initializes the usart master slave
 

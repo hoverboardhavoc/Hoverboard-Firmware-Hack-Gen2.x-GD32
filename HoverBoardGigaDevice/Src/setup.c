@@ -9,6 +9,8 @@
 * Copyright (C) 2018 Jakob Broemauer
 * Copyright (C) 2018 Kai Liebich
 * Copyright (C) 2018 Christoph Lehnert
+* Copyright (C) 2023 Robo Durden
+* Copyright (C) 2026 Hoverboard Havoc
 *
 * The program is based on the hoverboard project by Niklas Fauth. The 
 * structure was tried to be as similar as possible, so that everyone 
@@ -32,896 +34,805 @@
 #include "../Inc/defines.h"
 #include "../Inc/it.h"
 
-#ifndef pinMode
-void pinMode(uint32_t pin, uint32_t mode)
-{
-	gpio_mode_set(pin&0xffffff00U, mode, GPIO_PUPD_NONE,BIT(pin&0xfU) );
-	gpio_output_options_set(pin&0xffffff00U, GPIO_OTYPE_PP, GPIO_OSPEED_10MHZ, BIT(pin&0xfU));
-}
-
-void pinModePull(uint32_t pin, uint32_t mode, uint32_t pull)
-{
-	gpio_mode_set(pin&0xffffff00U, mode, pull,BIT(pin&0xfU) );
-	gpio_output_options_set(pin&0xffffff00U, GPIO_OTYPE_PP, GPIO_OSPEED_10MHZ, BIT(pin&0xfU));
-}
-#endif
-
+/* Phase 2 stage 1 (clock_init) ports against libopencm3. RCC + SCB are the
+ * only libopencm3 surfaces touched at this stage; their function-name
+ * namespaces (rcc_*, scb_*) don't collide with SPL (rcu_*) so this can
+ * coexist with the still-SPL bodies of the other init functions during
+ * the staged port. As subsequent peripherals port, more libopencm3
+ * headers are added and the corresponding SPL #include chain is
+ * removed file-wide. See decisions.md for the staging rationale. */
+#include <libopencm3/cm3/scb.h>
+#include <libopencm3/cm3/nvic.h>
+#include <libopencm3/gd32/f1x0/rcc.h>
+#include <libopencm3/gd32/f1x0/gpio.h>
+#include <libopencm3/gd32/f1x0/iwdg.h>
+#include <libopencm3/gd32/f1x0/usart.h>
+#include <libopencm3/gd32/f1x0/dma.h>
+#include <libopencm3/gd32/f1x0/nvic.h>
+#include <libopencm3/gd32/f1x0/timer.h>
+#include <libopencm3/gd32/f1x0/adc.h>
 
 #define TIMEOUT_FREQ  1000
 
-// timeout timer parameter structs
-timer_parameter_struct timeoutTimer_paramter_struct;
-
-// PWM timer Parameter structs
-timer_parameter_struct timerBldc_paramter_struct;	
-timer_break_parameter_struct timerBldc_break_parameter_struct;
-timer_oc_parameter_struct timerBldc_oc_parameter_struct;
-
-// DMA (USART) structs
-dma_parameter_struct dma_init_struct_usart;
-
-//uint8_t usartMasterSlave_rx_buf[USART_MASTERSLAVE_RX_BUFFERSIZE];
-//uint8_t usartSteer_COM_rx_buf[USART_STEER_COM_RX_BUFFERSIZE];
+/* SPL gather-then-init parameter structs (timer_parameter_struct,
+ * timer_break_parameter_struct, timer_oc_parameter_struct,
+ * dma_parameter_struct) used to live here. Removed during the
+ * libopencm3 port — every init function now uses per-attribute setters
+ * directly per guardrail #5, so the structs are dead weight. */
 
 uint8_t usart0_rx_buf[1];
 uint8_t usart1_rx_buf[1];
-uint8_t usart2_rx_buf[1];
 
-
-// DMA (ADC) structs
-dma_parameter_struct dma_init_struct_adc;
 extern adc_buf_t adc_buffer;
 
-//----------------------------------------------------------------------------
-// Initializes the interrupts
-//----------------------------------------------------------------------------
-void Interrupt_init(void)
-{
-  // Set IRQ priority configuration
-	TARGET_nvic_priority_group_set(NVIC_PRIGROUP_PRE4_SUB0);
-}
+/* Interrupt_init removed: the only thing it did — set NVIC priority
+ * grouping to PRE4_SUB0 — folded into clock_init() per brief Phase 2.
+ * Per-peripheral NVIC enables stay where they are (in each peripheral's
+ * init function). */
 
 //----------------------------------------------------------------------------
 // Initializes the watchdog
+//
+// Phase 2 stage 3 of the libopencm3 port. iwdg_set_period_ms(2048) lands on
+// IWDG_PR=2 (=/16) and IWDG_RLR=0x0FFF — final-state-identical to the SPL
+// fwdgt_config(0x0FFF, FWDGT_PSC_DIV16) path. Verified by regtrace vector
+// iwdg/config_2sec_period.yaml in final_state mode (gd-spl/gd32f1x0 ↔
+// libopencm3/gd32f1x0 → match).
+//
+// Actual hardware timeout is LSI-frequency dependent: GD32 LSI nominal
+// 40 kHz → ~1638 ms; STM32-style nominal 32 kHz → ~2048 ms. The bit-pattern
+// in IWDG_PR/IWDG_RLR is identical either way. The window-mode write that
+// the SPL Watchdog_init issued (TARGET_fwdgt_window_value_config(0x0FFF))
+// programmed IWDG_WINR to its post-reset default of 0x0FFF — equivalent to
+// "no window," and libopencm3's iwdg_set_period_ms doesn't write WINR at
+// all, leaving the same final state.
 //----------------------------------------------------------------------------
-ErrStatus Watchdog_init(void)
+ErrStatus watchdog_init(void)
 {
-	// Check if the system has resumed from FWDGT reset
-	if (RESET != rcu_flag_get(RCU_FLAG_FWDGTRST))
-	{   
-		// FWDGTRST flag set
-		rcu_all_reset_flag_clear();
-	}
-	
-	// Clock source is IRC40K (40 kHz)
-	// Prescaler is 16
-	// Reload value is 4096 (0x0FFF)
-	// Watchdog fires after 1638.4 ms
-	if (fwdgt_config(0x0FFF, FWDGT_PSC_DIV16) != SUCCESS ||
-		TARGET_fwdgt_window_value_config(0x0FFF) != SUCCESS)
-	{
-		return ERROR;
+	// If the previous reset was caused by the IWDG firing, clear the
+	// reset-cause flags. Diagnostic only — the firmware doesn't take a
+	// different code path based on reset cause; the original Watchdog_init
+	// did this so behavior parity preserved.
+	if (RCC_CSR & RCC_CSR_IWDGRSTF) {
+		RCC_CSR |= RCC_CSR_RMVF;
 	}
 
-	// Enable free watchdog timer
-	fwdgt_enable();
-	
+	iwdg_set_period_ms(2048);
+	iwdg_start();
+
 	return SUCCESS;
 }
 
 //----------------------------------------------------------------------------
-// Initializes the timeout timer
+// timeout_timer_init — TIMER13 (= TIM14 lp) at 1 kHz for the steering /
+// command timeout watchdog. Fires every 1 ms via tim14_isr in it.c.
+//
+// Not in the brief's Phase 2 list but called from main.c → needs to be
+// ported for the firmware to function.
+//
+// TIM14 is a 16-bit general-purpose timer with no center-aligned mode
+// (CR1.CMS is reserved on this peripheral per the GD32F1x0 RM). The SPL
+// path used CENTER_DOWN with period=SystemCoreClock/2/TIMEOUT_FREQ=36000
+// at PSC=0 — center alignment counted up + down, total cycles = 72000,
+// half-period = 1 ms, UPIF fires once per period.
+//
+// Without center mode we use EDGE up-counting with PSC=1 (divide by 2)
+// → timer clock = 36 MHz, ARR = 36000-1, UPIF every 36000 cycles =
+// every 1 ms. Same effective tick rate, different register encoding.
 //----------------------------------------------------------------------------
-void TimeoutTimer_init(void)
+void timeout_timer_init(void)
 {
-	// Enable timer clock
-	rcu_periph_clock_enable(RCU_TIMER_TIMEOUT);
-	
-	// Initial deinitialize of the timer
-	
-	timer_deinit(TIMER_TIMEOUT);
-	
-	// Set up the basic parameter struct for the timer
-	// Update event will be fired every 1ms
-	timeoutTimer_paramter_struct.counterdirection 	= TIMER_COUNTER_UP;
-	timeoutTimer_paramter_struct.prescaler 					= 0;
-	timeoutTimer_paramter_struct.alignedmode 				= TIMER_COUNTER_CENTER_DOWN;
-	timeoutTimer_paramter_struct.period							= SystemCoreClock / 2 / TIMEOUT_FREQ;
-	timeoutTimer_paramter_struct.clockdivision 			= TIMER_CKDIV_DIV1;
-	timeoutTimer_paramter_struct.repetitioncounter 	= 0;
-	timer_auto_reload_shadow_disable(TIMER_TIMEOUT);
-	timer_init(TIMER_TIMEOUT, &timeoutTimer_paramter_struct);
-	
-	// Enable TIMER_INT_UP interrupt and set priority
-	TARGET_nvic_irq_enable(TIMER_TIMEOUT_IRQn, 3, 0);		// can not interrupt 0 (hall_irq) or 1 (CalculateBLDC) or 2 (Usart)
-	timer_interrupt_enable(TIMER_TIMEOUT, TIMER_INT_UP);
-	
-	// Enable timer
-	timer_enable(TIMER_TIMEOUT);
+	rcc_periph_clock_enable(RCC_TIM14);
+	rcc_periph_reset_pulse(RST_TIM14);
+
+	timer_set_mode(TIM14, TIM_CR1_CKD_CK_INT, TIM_CR1_CMS_EDGE, TIM_CR1_DIR_UP);
+	timer_set_prescaler(TIM14, 1);
+	timer_set_period(TIM14, (SystemCoreClock / 2 / TIMEOUT_FREQ) - 1);
+	timer_set_repetition_counter(TIM14, 0);
+	timer_disable_preload(TIM14);
+
+	// NVIC priority 3: cannot interrupt 0 (BLDC/hall), 1 (ADC), or 2
+	// (USART). << 4 because Cortex-M3 implements only the upper 4 bits.
+	nvic_set_priority(NVIC_TIM14_IRQ, 3 << 4);
+	nvic_enable_irq(NVIC_TIM14_IRQ);
+	timer_enable_irq(TIM14, TIM_DIER_UIE);
+
+	timer_enable_counter(TIM14);
 }
 
 //----------------------------------------------------------------------------
 // Initializes the GPIOs
+//
+// Phase 2 stage 2 of the libopencm3 port. Every pin config is inlined as
+// direct gpio_mode_setup + gpio_set_output_options (+ gpio_set_af) calls
+// against libopencm3 — no pinMode/pinModeAF/AF_TIMER0_BLDC helper macros
+// (those are SPL-shape shims per brief guardrail #5). The firmware's
+// packed pin-code convention `(GPIOx | n)` survives: pin_port(p) gives
+// the port base, pin_mask(p) gives the bit mask (target.h). Speed
+// mapping: SPL GPIO_OSPEED_2MHZ→LOW, _10MHZ→MED, _50MHZ→HIGH (same
+// numeric values, libopencm3 names).
+//
+// AF map for GD32F130 (per datasheet 2.6.7): TIMER0 channels are all
+// GPIO_AF2; TIMER0 BRKIN on PA6 or PB12 is GPIO_AF2 too. USART0 on PB6/PB7
+// is GPIO_AF0; on PA2/PA3/PA9/PA10/PA14/PA15 is GPIO_AF1. USART1 on
+// PA8/PB0 is GPIO_AF4; on PA2/PA3/PA14/PA15 is GPIO_AF1.
 //----------------------------------------------------------------------------
-void GPIO_init(void)
+void gpio_init(void)
 {
-	// Enable all GPIO clocks
-	rcu_periph_clock_enable(RCU_GPIOA);
-	rcu_periph_clock_enable(RCU_GPIOB);
-	rcu_periph_clock_enable(RCU_GPIOC);
-	rcu_periph_clock_enable(RCU_GPIOF);
+	// Enable all GPIO clocks (libopencm3 RCC_GPIOx ↔ SPL RCU_GPIOx).
+	rcc_periph_clock_enable(RCC_GPIOA);
+	rcc_periph_clock_enable(RCC_GPIOB);
+	rcc_periph_clock_enable(RCC_GPIOC);
+	rcc_periph_clock_enable(RCC_GPIOF);
 
-	
 	#ifdef TIMER_BLDC_EMERGENCY_SHUTDOWN
-		// Init emergency shutdown pin
-		pinModeAF(TIMER_BLDC_EMERGENCY_SHUTDOWN,AF_TIMER0_BRKIN,GPIO_PUPD_NONE,GPIO_OSPEED_50MHZ)
+		// Emergency shutdown pin → TIMER0 BRKIN, AF2.
+		gpio_mode_setup(pin_port(TIMER_BLDC_EMERGENCY_SHUTDOWN),
+				GPIO_MODE_AF, GPIO_PUPD_NONE,
+				pin_mask(TIMER_BLDC_EMERGENCY_SHUTDOWN));
+		gpio_set_output_options(pin_port(TIMER_BLDC_EMERGENCY_SHUTDOWN),
+				GPIO_OTYPE_PP, GPIO_OSPEED_HIGH,
+				pin_mask(TIMER_BLDC_EMERGENCY_SHUTDOWN));
+		gpio_set_af(pin_port(TIMER_BLDC_EMERGENCY_SHUTDOWN),
+				GPIO_AF2,
+				pin_mask(TIMER_BLDC_EMERGENCY_SHUTDOWN));
 	#endif
-	
-	// Init PWM output Pins
-	// Configure: Alternate functions,  [Floating mode] / Pull-up / Pull-down
-	// Configure: Push-Pull mode, Output max speed 2MHz
-	pinModeAF(BLDC_GH, AF_TIMER0_BLDC, TIMER_BLDC_PULLUP, GPIO_OSPEED_2MHZ);
-	pinModeAF(BLDC_GL, AF_TIMER0_BLDC, TIMER_BLDC_PULLUP, GPIO_OSPEED_2MHZ);
-	pinModeAF(BLDC_BH, AF_TIMER0_BLDC, TIMER_BLDC_PULLUP, GPIO_OSPEED_2MHZ);
-	pinModeAF(BLDC_BL, AF_TIMER0_BLDC, TIMER_BLDC_PULLUP, GPIO_OSPEED_2MHZ);
-	pinModeAF(BLDC_YH, AF_TIMER0_BLDC, TIMER_BLDC_PULLUP, GPIO_OSPEED_2MHZ);
-	pinModeAF(BLDC_YL, AF_TIMER0_BLDC, TIMER_BLDC_PULLUP, GPIO_OSPEED_2MHZ);
 
+	// PWM output pins — TIMER0 channels CH0/CH0N/CH1/CH1N/CH2/CH2N (all AF2),
+	// 2 MHz output speed (suppresses ringing into the gate driver),
+	// pull configured per board (TIMER_BLDC_PULLUP from active layout).
+	gpio_mode_setup(pin_port(BLDC_GH), GPIO_MODE_AF, TIMER_BLDC_PULLUP, pin_mask(BLDC_GH));
+	gpio_set_output_options(pin_port(BLDC_GH), GPIO_OTYPE_PP, GPIO_OSPEED_LOW, pin_mask(BLDC_GH));
+	gpio_set_af(pin_port(BLDC_GH), GPIO_AF2, pin_mask(BLDC_GH));
 
-	
+	gpio_mode_setup(pin_port(BLDC_GL), GPIO_MODE_AF, TIMER_BLDC_PULLUP, pin_mask(BLDC_GL));
+	gpio_set_output_options(pin_port(BLDC_GL), GPIO_OTYPE_PP, GPIO_OSPEED_LOW, pin_mask(BLDC_GL));
+	gpio_set_af(pin_port(BLDC_GL), GPIO_AF2, pin_mask(BLDC_GL));
+
+	gpio_mode_setup(pin_port(BLDC_BH), GPIO_MODE_AF, TIMER_BLDC_PULLUP, pin_mask(BLDC_BH));
+	gpio_set_output_options(pin_port(BLDC_BH), GPIO_OTYPE_PP, GPIO_OSPEED_LOW, pin_mask(BLDC_BH));
+	gpio_set_af(pin_port(BLDC_BH), GPIO_AF2, pin_mask(BLDC_BH));
+
+	gpio_mode_setup(pin_port(BLDC_BL), GPIO_MODE_AF, TIMER_BLDC_PULLUP, pin_mask(BLDC_BL));
+	gpio_set_output_options(pin_port(BLDC_BL), GPIO_OTYPE_PP, GPIO_OSPEED_LOW, pin_mask(BLDC_BL));
+	gpio_set_af(pin_port(BLDC_BL), GPIO_AF2, pin_mask(BLDC_BL));
+
+	gpio_mode_setup(pin_port(BLDC_YH), GPIO_MODE_AF, TIMER_BLDC_PULLUP, pin_mask(BLDC_YH));
+	gpio_set_output_options(pin_port(BLDC_YH), GPIO_OTYPE_PP, GPIO_OSPEED_LOW, pin_mask(BLDC_YH));
+	gpio_set_af(pin_port(BLDC_YH), GPIO_AF2, pin_mask(BLDC_YH));
+
+	gpio_mode_setup(pin_port(BLDC_YL), GPIO_MODE_AF, TIMER_BLDC_PULLUP, pin_mask(BLDC_YL));
+	gpio_set_output_options(pin_port(BLDC_YL), GPIO_OTYPE_PP, GPIO_OSPEED_LOW, pin_mask(BLDC_YL));
+	gpio_set_af(pin_port(BLDC_YL), GPIO_AF2, pin_mask(BLDC_YL));
+
 	#ifndef REMOTE_AUTODETECT
-	
-	
-		#ifdef DEBUG_LED_PIN
-			gpio_mode_set(DEBUG_LED_PORT , GPIO_MODE_OUTPUT, GPIO_PUPD_NONE,DEBUG_LED_PIN);	
-			gpio_output_options_set(DEBUG_LED_PORT, GPIO_OTYPE_PP, GPIO_OSPEED_10MHZ, DEBUG_LED_PIN);
-		#endif
 
+		#ifdef DEBUG_LED_PIN
+			gpio_mode_setup(DEBUG_LED_PORT, GPIO_MODE_OUTPUT, GPIO_PUPD_NONE, DEBUG_LED_PIN);
+			gpio_set_output_options(DEBUG_LED_PORT, GPIO_OTYPE_PP, GPIO_OSPEED_MED, DEBUG_LED_PIN);
+		#endif
 
 		#ifdef LED_GREEN
-			pinMode(LED_GREEN,	GPIO_MODE_OUTPUT);
+			gpio_mode_setup(pin_port(LED_GREEN), GPIO_MODE_OUTPUT, GPIO_PUPD_NONE, pin_mask(LED_GREEN));
+			gpio_set_output_options(pin_port(LED_GREEN), GPIO_OTYPE_PP, GPIO_OSPEED_MED, pin_mask(LED_GREEN));
 		#endif
 		#ifdef LED_RED
-			pinMode(LED_RED,		GPIO_MODE_OUTPUT);
+			gpio_mode_setup(pin_port(LED_RED), GPIO_MODE_OUTPUT, GPIO_PUPD_NONE, pin_mask(LED_RED));
+			gpio_set_output_options(pin_port(LED_RED), GPIO_OTYPE_PP, GPIO_OSPEED_MED, pin_mask(LED_RED));
 		#endif
 		#ifdef LED_ORANGE
-			pinMode(LED_ORANGE,	GPIO_MODE_OUTPUT);
+			gpio_mode_setup(pin_port(LED_ORANGE), GPIO_MODE_OUTPUT, GPIO_PUPD_NONE, pin_mask(LED_ORANGE));
+			gpio_set_output_options(pin_port(LED_ORANGE), GPIO_OTYPE_PP, GPIO_OSPEED_MED, pin_mask(LED_ORANGE));
 		#endif
 		#ifdef UPPER_LED
-			pinMode(UPPER_LED,	GPIO_MODE_OUTPUT);
+			gpio_mode_setup(pin_port(UPPER_LED), GPIO_MODE_OUTPUT, GPIO_PUPD_NONE, pin_mask(UPPER_LED));
+			gpio_set_output_options(pin_port(UPPER_LED), GPIO_OTYPE_PP, GPIO_OSPEED_MED, pin_mask(UPPER_LED));
 		#endif
 		#ifdef LOWER_LED
-			pinMode(LOWER_LED,	GPIO_MODE_OUTPUT);
+			gpio_mode_setup(pin_port(LOWER_LED), GPIO_MODE_OUTPUT, GPIO_PUPD_NONE, pin_mask(LOWER_LED));
+			gpio_set_output_options(pin_port(LOWER_LED), GPIO_OTYPE_PP, GPIO_OSPEED_MED, pin_mask(LOWER_LED));
 		#endif
 		#ifdef MOSFET_OUT
-			pinMode(MOSFET_OUT,	GPIO_MODE_OUTPUT);
+			gpio_mode_setup(pin_port(MOSFET_OUT), GPIO_MODE_OUTPUT, GPIO_PUPD_NONE, pin_mask(MOSFET_OUT));
+			gpio_set_output_options(pin_port(MOSFET_OUT), GPIO_OTYPE_PP, GPIO_OSPEED_MED, pin_mask(MOSFET_OUT));
 		#endif
 
+		// Hall sensor inputs — floating. No pull required because the
+		// hoverboard hall PCB has open-drain comparators with on-board
+		// pull-ups already.
+		gpio_mode_setup(pin_port(HALL_A), GPIO_MODE_INPUT, GPIO_PUPD_NONE, pin_mask(HALL_A));
+		gpio_mode_setup(pin_port(HALL_B), GPIO_MODE_INPUT, GPIO_PUPD_NONE, pin_mask(HALL_B));
+		gpio_mode_setup(pin_port(HALL_C), GPIO_MODE_INPUT, GPIO_PUPD_NONE, pin_mask(HALL_C));
 
-		#ifdef DEBUG_LED_PIN
-			gpio_mode_set(DEBUG_LED_PORT , GPIO_MODE_OUTPUT, GPIO_PUPD_NONE,DEBUG_LED_PIN);	
-			gpio_output_options_set(DEBUG_LED_PORT, GPIO_OTYPE_PP, GPIO_OSPEED_10MHZ, DEBUG_LED_PIN);
-		#endif
-	
-	
-		// Init HAL input
-		pinMode(HALL_A,	GPIO_MODE_INPUT);
-		pinMode(HALL_B,	GPIO_MODE_INPUT);
-		pinMode(HALL_C,	GPIO_MODE_INPUT);
-	
-		// Init ADC pins
+		// ADC analog inputs — analog mode disconnects the digital input
+		// (Schmitt trigger off, no glitch energy on the supply).
 		#ifdef VBATT
-			pinMode(VBATT, GPIO_MODE_ANALOG);
+			gpio_mode_setup(pin_port(VBATT), GPIO_MODE_ANALOG, GPIO_PUPD_NONE, pin_mask(VBATT));
 		#endif
 		#ifdef CURRENT_DC
-			pinMode(CURRENT_DC, GPIO_MODE_ANALOG);
+			gpio_mode_setup(pin_port(CURRENT_DC), GPIO_MODE_ANALOG, GPIO_PUPD_NONE, pin_mask(CURRENT_DC));
+		#endif
+		#if defined(PHASE_CURRENT_A) && defined(PHASE_CURRENT_B)
+			gpio_mode_setup(pin_port(PHASE_CURRENT_A), GPIO_MODE_ANALOG, GPIO_PUPD_NONE, pin_mask(PHASE_CURRENT_A));
+			gpio_mode_setup(pin_port(PHASE_CURRENT_B), GPIO_MODE_ANALOG, GPIO_PUPD_NONE, pin_mask(PHASE_CURRENT_B));
 		#endif
 		#ifdef REMOTE_ADC
-			pinMode(PA2, GPIO_MODE_ANALOG);
-			pinMode(PA3, GPIO_MODE_ANALOG);
+			gpio_mode_setup(pin_port(PA2), GPIO_MODE_ANALOG, GPIO_PUPD_NONE, pin_mask(PA2));
+			gpio_mode_setup(pin_port(PA3), GPIO_MODE_ANALOG, GPIO_PUPD_NONE, pin_mask(PA3));
 		#endif
 
-
-		// Init self hold
 		#ifdef SELF_HOLD
-			pinMode(SELF_HOLD,	GPIO_MODE_OUTPUT);
+			gpio_mode_setup(pin_port(SELF_HOLD), GPIO_MODE_OUTPUT, GPIO_PUPD_NONE, pin_mask(SELF_HOLD));
+			gpio_set_output_options(pin_port(SELF_HOLD), GPIO_OTYPE_PP, GPIO_OSPEED_MED, pin_mask(SELF_HOLD));
 		#endif
 
 		#ifdef BUZZER
-			// Init buzzer
-			pinModeSpeed(BUZZER,	GPIO_MODE_OUTPUT,GPIO_OSPEED_50MHZ);
-			//gpio_mode_set(BUZZER_PORT , GPIO_MODE_OUTPUT, GPIO_PUPD_NONE, BUZZER_PIN);	
-			//gpio_output_options_set(BUZZER_PORT, GPIO_OTYPE_PP, GPIO_OSPEED_50MHZ, BUZZER_PIN);
+			// 50 MHz output speed for the buzzer — the carrier needs sharp
+			// edges so the audible note isn't muddied by output-stage rolloff.
+			gpio_mode_setup(pin_port(BUZZER), GPIO_MODE_OUTPUT, GPIO_PUPD_NONE, pin_mask(BUZZER));
+			gpio_set_output_options(pin_port(BUZZER), GPIO_OTYPE_PP, GPIO_OSPEED_HIGH, pin_mask(BUZZER));
 		#endif
 
 		#ifdef MASTER_OR_SINGLE
-		
-			// Init button
 			#ifdef BUTTON_PU
-				pinModePull(BUTTON_PU,GPIO_MODE_INPUT,GPIO_PUPD_PULLUP);
+				// Button with internal pull-up. Reads HIGH when not pressed,
+				// LOW when pressed (open switch to GND).
+				gpio_mode_setup(pin_port(BUTTON_PU), GPIO_MODE_INPUT, GPIO_PUPD_PULLUP, pin_mask(BUTTON_PU));
 			#elif defined(BUTTON)
-				pinMode(BUTTON,	GPIO_MODE_INPUT);
+				gpio_mode_setup(pin_port(BUTTON), GPIO_MODE_INPUT, GPIO_PUPD_NONE, pin_mask(BUTTON));
 			#endif
-			
+
 			#if defined(CHARGE_STATE) && defined(MASTER_OR_SINGLE)
-				pinModePull(CHARGE_STATE,GPIO_MODE_INPUT, GPIO_PUPD_PULLUP);
+				gpio_mode_setup(pin_port(CHARGE_STATE), GPIO_MODE_INPUT, GPIO_PUPD_PULLUP, pin_mask(CHARGE_STATE));
 			#endif
 		#endif
-		
+
 		#ifdef PHOTO_L
-			pinModePull(PHOTO_L,GPIO_MODE_INPUT,GPIO_PUPD_PULLUP);
+			gpio_mode_setup(pin_port(PHOTO_L), GPIO_MODE_INPUT, GPIO_PUPD_PULLUP, pin_mask(PHOTO_L));
 		#endif
 		#ifdef PHOTO_R
-			pinModePull(PHOTO_R,GPIO_MODE_INPUT,GPIO_PUPD_PULLUP);
+			gpio_mode_setup(pin_port(PHOTO_R), GPIO_MODE_INPUT, GPIO_PUPD_PULLUP, pin_mask(PHOTO_R));
 		#endif
-		
-	#endif // 	#ifndef REMOTE_AUTODETECT
 
+	#endif // #ifndef REMOTE_AUTODETECT
 }
 
-
-//volatile uint8_t hall = 0;        // Global hall state
-//volatile uint32_t last_edge = 0;  // Timestamp of last edge (e.g., SysTick count)
-
-
-
-
-
-/*
 //----------------------------------------------------------------------------
-// Initializes the PWM
+// 3-phase PWM init (TIMER0 = libopencm3 TIM1, advanced timer)
+//
+// Phase 2 stage 5a of the libopencm3 port. All SPL timer_*_config /
+// timer_break_config / TARGET_nvic_irq_enable shims inlined as direct
+// libopencm3 calls.
+//
+// TIMER0 channels — vendor naming → board naming → libopencm3:
+//   CH0 / CH0N → BLDC_BLUE  → TIM_OC1 / TIM_OC1N
+//   CH1 / CH1N → BLDC_BLUE? → TIM_OC2 / TIM_OC2N  (board uses CH_1 = blue, CH_2 = green; see TIMER_BLDC_CHANNEL_*)
+//   CH2 / CH2N → BLDC_GREEN → TIM_OC3 / TIM_OC3N
+// Active layout (defines_2-1-20.h via defines.h:98-100):
+//   TIMER_BLDC_CHANNEL_G = TIMER_CH_2 (= TIM_OC3 / TIM_OC3N)
+//   TIMER_BLDC_CHANNEL_B = TIMER_CH_1 (= TIM_OC2 / TIM_OC2N)
+//   TIMER_BLDC_CHANNEL_Y = TIMER_CH_0 (= TIM_OC1 / TIM_OC1N)
+//
+// Center-aligned mode CMS=11 ("center-aligned mode 3" — UPIF on both
+// overflow and underflow); rep counter = 1 makes UPIF fire once per full
+// period (every other half-period). Per GD32F1x0 User Manual Rev3.6
+// §15.1.4. The post-init UPG software event re-locks update polarity.
+//
+// Master mode = UPDATE → TRGO fires on each UEV; consumed by TIMER2
+// (= TIM3) in adc_trigger_timer_init via the ITI0 input trigger path.
+//
+// Vector coverage: regtrace `vectors/timer/pwm_init_center_aligned_16khz.yaml`
+// covers the basic timer-init shape (mode + period + prescaler + repetition
+// + UPG). The output-channel + break-config + per-channel state writes
+// in this function are not regtrace-covered yet — final state matches the
+// SPL pattern register-by-register and is well-documented in the GD32
+// SPL/libopencm3 mapping (see decisions.md for the per-call mapping
+// table).
 //----------------------------------------------------------------------------
-void PWM_initOld(void)
+void pwm_init(void)
 {
-	// Enable timer clock
-	rcu_periph_clock_enable(RCU_TIMER_BLDC);
-	
-	// Initial deinitialize of the timer
-	timer_deinit(TIMER_BLDC);
-	
-	// Set up the basic parameter struct for the timer
-	timerBldc_paramter_struct.counterdirection = TIMER_COUNTER_UP;
-	timerBldc_paramter_struct.prescaler = 0;
-	timerBldc_paramter_struct.alignedmode = TIMER_COUNTER_CENTER_BOTH;	//changed from TIMER_COUNTER_CENTER_DOWN by deepseek for SVM;
-	timerBldc_paramter_struct.period = BLDC_TIMER_PERIOD;
-	timerBldc_paramter_struct.clockdivision = TIMER_CKDIV_DIV1;
+	// TIMER0 (= TIM1) clock and full reset.
+	rcc_periph_clock_enable(RCC_TIM1);
+	rcc_periph_reset_pulse(RST_TIM1);
 
-	
-	timerBldc_paramter_struct.repetitioncounter = 0;
-	timer_auto_reload_shadow_disable(TIMER_BLDC);
-	
-	// Initialize timer with basic parameter struct
-	timer_init(TIMER_BLDC, &timerBldc_paramter_struct);
+	// Center-aligned PWM at PWM_FREQ. CMS=CENTER_3 fires UPIF at both
+	// overflow AND underflow; rep_counter=1 then halves UPIF rate so it
+	// lands once per full period (replaces the SPL software-toggle hack
+	// the firmware used to need in it.c). CKD=DIV1 (no clock division).
+	timer_set_mode(TIM1, TIM_CR1_CKD_CK_INT, TIM_CR1_CMS_CENTER_3, TIM_CR1_DIR_UP);
+	timer_set_period(TIM1, BLDC_TIMER_PERIOD);
+	timer_set_prescaler(TIM1, 0);
+	timer_set_repetition_counter(TIM1, 1);
+	timer_disable_preload(TIM1);  // ARPE = 0 — auto-reload shadow off.
 
-	// Deactivate output channel fastmode
-	timer_channel_output_fast_config(TIMER_BLDC, TIMER_BLDC_CHANNEL_G, TIMER_OC_FAST_DISABLE);
-	timer_channel_output_fast_config(TIMER_BLDC, TIMER_BLDC_CHANNEL_B, TIMER_OC_FAST_DISABLE);
-	timer_channel_output_fast_config(TIMER_BLDC, TIMER_BLDC_CHANNEL_Y, TIMER_OC_FAST_DISABLE);
-	
-	// Deactivate output channel shadow function
-	timer_channel_output_shadow_config(TIMER_BLDC, TIMER_BLDC_CHANNEL_G, TIMER_OC_SHADOW_DISABLE);
-	timer_channel_output_shadow_config(TIMER_BLDC, TIMER_BLDC_CHANNEL_B, TIMER_OC_SHADOW_DISABLE);
-	timer_channel_output_shadow_config(TIMER_BLDC, TIMER_BLDC_CHANNEL_Y, TIMER_OC_SHADOW_DISABLE);
-	
-	// Set output channel PWM type to PWM1
+	// Force a software UPG after writing odd CREP so update events are
+	// guaranteed to land on underflow (GD32F1x0 TRM §15.1.4: "If an update
+	// event is generated by software after writing an odd number to CREP,
+	// the update events will be generated on the underflow.").
+	timer_generate_event(TIM1, TIM_EGR_UG);
 
-	// CH0COMCTL[2:0]
-	// 110: PWM mode0.
-	// When counting up, OxCPRE is high when the counter is smaller than TIMER0_CHxCV, and low otherwise.
-	// When counting down, OxCPRE is low when the counter is larger than TIMER0_CHxCV, and high otherwise.
-	// 111: PWM mode1.
-	// When counting up, OxCPRE is low when the counter is smaller than TIMER0_CHxCV, and high otherwise.
-	// When counting down, OxCPRE is high when the counter is larger than TIMER0_CHxCV, and low otherwise.
-	timer_channel_output_mode_config(TIMER_BLDC, TIMER_BLDC_CHANNEL_G, TIMER_OC_MODE_PWM1);
-	timer_channel_output_mode_config(TIMER_BLDC, TIMER_BLDC_CHANNEL_B, TIMER_OC_MODE_PWM1);
-	timer_channel_output_mode_config(TIMER_BLDC, TIMER_BLDC_CHANNEL_Y, TIMER_OC_MODE_PWM1);
+	// TRGO = update event. Drives TIMER2 in adc_trigger_timer_init via
+	// ITI0; the ADC regular group's external trigger ETSRC selects
+	// T2_TRGO. F130 can't route TIM1's TRGO directly to ADC ETSRC
+	// (which only offers T0_CH0/CH1/CH2 = moving PWM outputs), so
+	// TIMER2 acts as a fixed-offset bridge.
+	timer_set_master_mode(TIM1, TIM_CR2_MMS_UPDATE);
 
-	// Initialize pulse length with value 0 (pulse duty factor = zero)
-	timer_channel_output_pulse_value_config(TIMER_BLDC, TIMER_BLDC_CHANNEL_G, 0);
-	timer_channel_output_pulse_value_config(TIMER_BLDC, TIMER_BLDC_CHANNEL_B, 0);
-	timer_channel_output_pulse_value_config(TIMER_BLDC, TIMER_BLDC_CHANNEL_Y, 0);
-	
-	// Set up the output channel parameter struct
-	timerBldc_oc_parameter_struct.ocpolarity 		= TIMER_OC_POLARITY_HIGH; //HIGH: CHx_O is the same as OxCPRE , LOW: CHx_O is contrary to OxCPRE
-	timerBldc_oc_parameter_struct.ocnpolarity 	= TIMER_OCN_POLARITY_LOW; //HIGH: CHx_ON is contrary to OxCPRE, LOW: CHx_O is the same as OxCPRE
-	timerBldc_oc_parameter_struct.ocidlestate 	= TIMER_OC_IDLE_STATE_LOW;
-	timerBldc_oc_parameter_struct.ocnidlestate 	= TIMER_OCN_IDLE_STATE_HIGH;
-	
-	// Configure all three output channels with the output channel parameter struct
-	timer_channel_output_config(TIMER_BLDC, TIMER_BLDC_CHANNEL_G, &timerBldc_oc_parameter_struct);
-  timer_channel_output_config(TIMER_BLDC, TIMER_BLDC_CHANNEL_B, &timerBldc_oc_parameter_struct);
-	timer_channel_output_config(TIMER_BLDC, TIMER_BLDC_CHANNEL_Y, &timerBldc_oc_parameter_struct);
+	// Per-channel config for OC1/OC2/OC3 (the vendor's TIMER_CH_0/1/2).
+	// PWM mode 1: counting up → OxCPRE LOW when CNT<CCR, HIGH otherwise;
+	// counting down → OxCPRE HIGH when CNT>CCR, LOW otherwise.
+	// Polarity HIGH on CHx (= OxCPRE not inverted), LOW on CHxN (= OxCPRE
+	// inverted on the complementary pin). Idle state: CHx = LOW, CHxN =
+	// HIGH (matches the gate-driver convention with high-side conducting
+	// when the controller asserts HIGH and low-side conducting when the
+	// controller asserts LOW).
+	enum tim_oc_id ocs[3]   = { TIM_OC1, TIM_OC2, TIM_OC3 };
+	enum tim_oc_id ocns[3]  = { TIM_OC1N, TIM_OC2N, TIM_OC3N };
+	for (int i = 0; i < 3; i++) {
+		timer_set_oc_slow_mode(TIM1, ocs[i]);          // OCxFE = 0 (fast off)
+		timer_disable_oc_preload(TIM1, ocs[i]);        // OCxPE = 0 (shadow off)
+		/* libopencm3 TIM_OCM_PWM2 (bit pattern 0b111) ↔ gd-spl
+		 * TIMER_OC_MODE_PWM1 — naming inverted between libraries. The
+		 * GD32 RM "PWM mode 1" (output LOW when CNT<CCR while
+		 * counting up) is libopencm3's "PWM mode 2"; libopencm3's
+		 * PWM mode 1 (output HIGH when CNT<CCR while counting up) is
+		 * GD's "PWM mode 0". The firmware intent is the original
+		 * gd-spl PWM mode 1 = bit pattern 0b111, so libopencm3
+		 * spelling is TIM_OCM_PWM2. Verified bit-identical against
+		 * gd-spl trace at <TIM1_BASE>+0x18 in regtrace vector
+		 * timer/slave_restart_oc1ref_trgo. */
+		timer_set_oc_mode(TIM1, ocs[i], TIM_OCM_PWM2);
+		timer_set_oc_value(TIM1, ocs[i], 0);           // start at duty=0
+		timer_set_oc_polarity_high(TIM1, ocs[i]);
+		timer_set_oc_polarity_low(TIM1, ocns[i]);
+		timer_set_oc_idle_state_unset(TIM1, ocs[i]);   // OISx = 0 → idle LOW
+		timer_set_oc_idle_state_set(TIM1, ocns[i]);    // OISxN = 1 → idle HIGH
+	}
 
-	// Set up the break parameter struct
-	timerBldc_break_parameter_struct.runoffstate			= TIMER_ROS_STATE_ENABLE;
-	timerBldc_break_parameter_struct.ideloffstate 		= TIMER_IOS_STATE_DISABLE;
-	timerBldc_break_parameter_struct.protectmode			= TIMER_CCHP_PROT_OFF;
-	timerBldc_break_parameter_struct.outputautostate 	= TIMER_OUTAUTO_ENABLE;
-	timerBldc_break_parameter_struct.breakpolarity		= TIMER_BREAK_POLARITY_LOW;
+	// Break / dead-time config (BDTR):
+	//   OSSR = 1 (run-mode-off-state ENABLE — drives outputs to OISx/OISxN
+	//             values when CCxE/CCxNE = 0)
+	//   OSSI = 0 (idle-mode-off-state DISABLE — disconnects outputs)
+	//   LOCK = 00 (no register-level write protection)
+	//   AOE  = 1 (automatic-output ENABLE — MOE auto-sets on next UEV)
+	//   BKP  = 0 (break input polarity LOW)
+	//   BKE  = 0 (break input DISABLE — Gen2.2 HarleyBob convention; the
+	//             gate-driver fault line is wired but not always present
+	//             so leaving it disabled prevents spurious shutdowns)
+	//   DTG  = DEAD_TIME (e.g. 32 → ~444 ns at 72 MHz; clipped at 0xFF)
+	timer_set_enabled_off_state_in_run_mode(TIM1);
+	timer_set_break_lock(TIM1, TIM_BDTR_LOCK_OFF);
+	timer_enable_break_automatic_output(TIM1);
+	timer_set_break_polarity_low(TIM1);
+	timer_disable_break(TIM1);
+	timer_set_deadtime(TIM1, DEAD_TIME);
 
-	//timerBldc_break_parameter_struct.deadtime 				= DEAD_TIME;
-	//timerBldc_break_parameter_struct.breakstate				= TIMER_BREAK_DISABLE;		// Gen2.2 HarleyBob used TIMER_BREAK_DISABLE instead of TIMER_BREAK_ENABLE
-	//deepseek: Add dead time configuration (critical for SVM):
-	#ifdef BLDC_SINEx
-		timerBldc_break_parameter_struct.deadtime = 0;  // No dead time needed for SVM   ; robo: really ?? deadtime is to prevent short cut through highside mosfet and lowside mosfet being on at the same time
-	#else
-		timerBldc_break_parameter_struct.deadtime 				= DEAD_TIME;
-	#endif
-	timerBldc_break_parameter_struct.breakstate = TIMER_BREAK_DISABLE;
+	// Disable until all channels enabled, then enable all 6 outputs
+	// (CH0..CH2 + CH0N..CH2N). With BDTR.AOE=1, MOE will auto-assert
+	// on the next UEV after timer_enable_counter.
+	timer_disable_counter(TIM1);
+	for (int i = 0; i < 3; i++) {
+		timer_enable_oc_output(TIM1, ocs[i]);
+		timer_enable_oc_output(TIM1, ocns[i]);
+	}
 
-	
-	
-	// Configure the timer with the break parameter struct
-	timer_break_config(TIMER_BLDC, &timerBldc_break_parameter_struct);
+	// NVIC: TIM1_BRK_UP_TRG_COM is the IRQ that fires on UPIF (and also
+	// on BRK / TRG / COM events, which we don't use). Pre-empt priority
+	// 0 — the highest, peer with the hall IRQ; the firmware relies on
+	// the hall handler completing before this one runs (same priority,
+	// non-nested).
+	nvic_set_priority(NVIC_TIM1_BRK_UP_TRG_COM_IRQ, 0);
+	nvic_enable_irq(NVIC_TIM1_BRK_UP_TRG_COM_IRQ);
+	timer_enable_irq(TIM1, TIM_DIER_UIE);
 
-	// Disable until all channels are set for PWM output
-	timer_disable(TIMER_BLDC);
-
-	// Enable all three channels for PWM output
-	timer_channel_output_state_config(TIMER_BLDC, TIMER_BLDC_CHANNEL_G, TIMER_CCX_ENABLE);
-	timer_channel_output_state_config(TIMER_BLDC, TIMER_BLDC_CHANNEL_B, TIMER_CCX_ENABLE);
-	timer_channel_output_state_config(TIMER_BLDC, TIMER_BLDC_CHANNEL_Y, TIMER_CCX_ENABLE);
-
-	// Enable all three complemenary channels for PWM output
-	timer_channel_complementary_output_state_config(TIMER_BLDC, TIMER_BLDC_CHANNEL_G, TIMER_CCXN_ENABLE);
-	timer_channel_complementary_output_state_config(TIMER_BLDC, TIMER_BLDC_CHANNEL_B, TIMER_CCXN_ENABLE);
-	timer_channel_complementary_output_state_config(TIMER_BLDC, TIMER_BLDC_CHANNEL_Y, TIMER_CCXN_ENABLE);
-	
-	// Enable TIMER_INT_UP interrupt and set priority
-	TARGET_nvic_irq_enable(TIMER0_BRK_UP_TRG_COM_IRQn, 0, 0);		// can interrupt everything, but wait for hall-irq to finish
-	timer_interrupt_enable(TIMER_BLDC, TIMER_INT_UP);
-	
-	// Enable the timer and start PWM
-	timer_enable(TIMER_BLDC);
-}
-*/
-
-void PWM_init(void)
-{
-	// Enable timer clock
-	rcu_periph_clock_enable(RCU_TIMER_BLDC);
-	
-	// Initial deinitialize of the timer
-	timer_deinit(TIMER_BLDC);
-	
-	// Set up the basic parameter struct for the timer
-	timerBldc_paramter_struct.counterdirection = TIMER_COUNTER_UP;
-	timerBldc_paramter_struct.prescaler = 0;
-	timerBldc_paramter_struct.alignedmode = TIMER_COUNTER_CENTER_BOTH;	//changed to TIMER_COUNTER_CENTER_BOTH from TIMER_COUNTER_CENTER_DOWN by deepseek for SVM;
-	timerBldc_paramter_struct.period = BLDC_TIMER_PERIOD;
-	timerBldc_paramter_struct.clockdivision = TIMER_CKDIV_DIV1;
-	timerBldc_paramter_struct.repetitioncounter = 0;
-	timer_auto_reload_shadow_disable(TIMER_BLDC);
-	
-	// Initialize timer with basic parameter struct
-	timer_init(TIMER_BLDC, &timerBldc_paramter_struct);
-
-	// Deactivate output channel fastmode
-	timer_channel_output_fast_config(TIMER_BLDC, TIMER_BLDC_CHANNEL_G, TIMER_OC_FAST_DISABLE);
-	timer_channel_output_fast_config(TIMER_BLDC, TIMER_BLDC_CHANNEL_B, TIMER_OC_FAST_DISABLE);
-	timer_channel_output_fast_config(TIMER_BLDC, TIMER_BLDC_CHANNEL_Y, TIMER_OC_FAST_DISABLE);
-	
-	// Deactivate output channel shadow function
-	timer_channel_output_shadow_config(TIMER_BLDC, TIMER_BLDC_CHANNEL_G, TIMER_OC_SHADOW_DISABLE);
-	timer_channel_output_shadow_config(TIMER_BLDC, TIMER_BLDC_CHANNEL_B, TIMER_OC_SHADOW_DISABLE);
-	timer_channel_output_shadow_config(TIMER_BLDC, TIMER_BLDC_CHANNEL_Y, TIMER_OC_SHADOW_DISABLE);
-	
-	// Set output channel PWM type to PWM1
-	/*
-	CH0COMCTL[2:0]
-	110: PWM mode0.
-	When counting up, OxCPRE is high when the counter is smaller than TIMER0_CHxCV, and low otherwise.
-	When counting down, OxCPRE is low when the counter is larger than TIMER0_CHxCV, and high otherwise.
-	111: PWM mode1.
-	When counting up, OxCPRE is low when the counter is smaller than TIMER0_CHxCV, and high otherwise.
-	When counting down, OxCPRE is high when the counter is larger than TIMER0_CHxCV, and low otherwise.
-	*/
-	timer_channel_output_mode_config(TIMER_BLDC, TIMER_BLDC_CHANNEL_G, TIMER_OC_MODE_PWM1);
-	timer_channel_output_mode_config(TIMER_BLDC, TIMER_BLDC_CHANNEL_B, TIMER_OC_MODE_PWM1);
-	timer_channel_output_mode_config(TIMER_BLDC, TIMER_BLDC_CHANNEL_Y, TIMER_OC_MODE_PWM1);
-
-	// Initialize pulse length with value 0 (pulse duty factor = zero)
-	timer_channel_output_pulse_value_config(TIMER_BLDC, TIMER_BLDC_CHANNEL_G, 0);
-	timer_channel_output_pulse_value_config(TIMER_BLDC, TIMER_BLDC_CHANNEL_B, 0);
-	timer_channel_output_pulse_value_config(TIMER_BLDC, TIMER_BLDC_CHANNEL_Y, 0);
-	
-	// Set up the output channel parameter struct
-	timerBldc_oc_parameter_struct.ocpolarity 		= TIMER_OC_POLARITY_HIGH; //HIGH: CHx_O is the same as OxCPRE , LOW: CHx_O is contrary to OxCPRE
-	timerBldc_oc_parameter_struct.ocnpolarity 	= TIMER_OCN_POLARITY_LOW; //HIGH: CHx_ON is contrary to OxCPRE, LOW: CHx_O is the same as OxCPRE
-	timerBldc_oc_parameter_struct.ocidlestate 	= TIMER_OC_IDLE_STATE_LOW;
-	timerBldc_oc_parameter_struct.ocnidlestate 	= TIMER_OCN_IDLE_STATE_HIGH;
-	
-	// Configure all three output channels with the output channel parameter struct
-	timer_channel_output_config(TIMER_BLDC, TIMER_BLDC_CHANNEL_G, &timerBldc_oc_parameter_struct);
-  timer_channel_output_config(TIMER_BLDC, TIMER_BLDC_CHANNEL_B, &timerBldc_oc_parameter_struct);
-	timer_channel_output_config(TIMER_BLDC, TIMER_BLDC_CHANNEL_Y, &timerBldc_oc_parameter_struct);
-
-	// Set up the break parameter struct
-	timerBldc_break_parameter_struct.runoffstate			= TIMER_ROS_STATE_ENABLE;
-	timerBldc_break_parameter_struct.ideloffstate 		= TIMER_IOS_STATE_DISABLE;
-	timerBldc_break_parameter_struct.protectmode			= TIMER_CCHP_PROT_OFF;
-	timerBldc_break_parameter_struct.outputautostate 	= TIMER_OUTAUTO_ENABLE;
-	timerBldc_break_parameter_struct.breakpolarity		= TIMER_BREAK_POLARITY_LOW;
-	timerBldc_break_parameter_struct.deadtime 				= DEAD_TIME;	//deepseek: Add dead time configuration (critical for SVM):
-	timerBldc_break_parameter_struct.breakstate				= TIMER_BREAK_DISABLE;		// Gen2.2 HarleyBob used TIMER_BREAK_DISABLE instead of TIMER_BREAK_ENABLE
-	//timerBldc_break_parameter_struct.breakstate				= TIMER_BREAK_ENABLE;		// Gen2.x
-
-	// Configure the timer with the break parameter struct
-	timer_break_config(TIMER_BLDC, &timerBldc_break_parameter_struct);
-
-	// Disable until all channels are set for PWM output
-	timer_disable(TIMER_BLDC);
-
-	// Enable all three channels for PWM output
-	timer_channel_output_state_config(TIMER_BLDC, TIMER_BLDC_CHANNEL_G, TIMER_CCX_ENABLE);
-	timer_channel_output_state_config(TIMER_BLDC, TIMER_BLDC_CHANNEL_B, TIMER_CCX_ENABLE);
-	timer_channel_output_state_config(TIMER_BLDC, TIMER_BLDC_CHANNEL_Y, TIMER_CCX_ENABLE);
-
-	// Enable all three complemenary channels for PWM output
-	timer_channel_complementary_output_state_config(TIMER_BLDC, TIMER_BLDC_CHANNEL_G, TIMER_CCXN_ENABLE);
-	timer_channel_complementary_output_state_config(TIMER_BLDC, TIMER_BLDC_CHANNEL_B, TIMER_CCXN_ENABLE);
-	timer_channel_complementary_output_state_config(TIMER_BLDC, TIMER_BLDC_CHANNEL_Y, TIMER_CCXN_ENABLE);
-	
-	// Enable TIMER_INT_UP interrupt and set priority
-	TARGET_nvic_irq_enable(TIMER0_BRK_UP_TRG_COM_IRQn, 0, 0); // can interrupt everything, but wait for hall-irq (also 0) to finish
-	timer_interrupt_enable(TIMER_BLDC, TIMER_INT_UP);
-	
-	// Enable the timer and start PWM
-	timer_enable(TIMER_BLDC);
+	// Start PWM. UEV sets MOE; outputs go live the same cycle.
+	timer_enable_counter(TIM1);
 }
 
-/*
+#if defined(PHASE_CURRENT_A) && defined(PHASE_CURRENT_B)
 //----------------------------------------------------------------------------
-// Initializes the ADC
+// ADC trigger timer (TIMER2) — hardware pipeline:
+//
+//     TIMER0 UPIF (valley) ──TRGO──> TIMER2 reset (slave restart mode)
+//                                         │
+//                                         │ counts up from 0 at TIMER_CK
+//                                         │
+//                                         ▼
+//                              TIMER2 CH0 compare at FOC_SAMPLE_OFFSET_TICKS
+//                                         │
+//                                         │ fires O0CPRE → TRGO
+//                                         │
+//                                         ▼
+//                     ADC regular group (ETSRC = T2_TRGO) starts scan
+//
+// Net effect: ADC conversion begins FOC_SAMPLE_OFFSET_TICKS counts after
+// each PWM valley, with sub-µs jitter determined only by silicon path
+// delay. No CPU in the loop. Adjust FOC_SAMPLE_OFFSET_TICKS to dodge
+// dead-time edges at extreme duty cycles.
+//
+// TIMER2 ITI0 = TIMER0_TRGO per TRM §15 "Slave mode example table".
 //----------------------------------------------------------------------------
-void ADC_initOld(void)
+#ifndef FOC_SAMPLE_OFFSET_TICKS
+	#define FOC_SAMPLE_OFFSET_TICKS 10   // ~140 ns at 72 MHz — essentially at the valley
+#endif
+
+//----------------------------------------------------------------------------
+// adc_trigger_timer_init — TIMER2 (= libopencm3 TIM3) as a fixed-offset
+// slave to TIMER0 (= TIM1)'s TRGO. Phase 2 stage 5b.
+//
+// Hardware pipeline (no CPU in the loop after init):
+//
+//   TIM1 UPIF (PWM valley) ──TRGO──> TIM3 reset (slave restart mode)
+//                                       │
+//                                       │ counts up from 0 at 72 MHz
+//                                       ▼
+//                            TIM3 CH1 compare at FOC_SAMPLE_OFFSET_TICKS
+//                                       │
+//                                       │ rising edge of OC1REF → TRGO
+//                                       ▼
+//                  ADC regular group (ETSRC = T2_TRGO) starts scan
+//
+// libopencm3 channel naming offset by 1 from GD: TIMER_CH_0 (GD) = TIM_OC1
+// (libopencm3). Same hardware, different vendor numbering.
+//----------------------------------------------------------------------------
+void adc_trigger_timer_init(void)
 {
-	// Enable ADC and DMA clock
-	rcu_periph_clock_enable(RCU_ADC);
-	rcu_periph_clock_enable(RCU_DMA);
-	
-  // Configure ADC clock (APB2 clock is DIV1 -> 72MHz, ADC clock is DIV6 -> 12MHz)
-	rcu_adc_clock_config(RCU_ADCCK_APB2_DIV6);
-	
-	// Interrupt channel 0 enable
-	TARGET_nvic_irq_enable(DMA_Channel0_IRQn, 1, 0);
-	
-	// Initialize DMA channel 0 for ADC
-	TARGET_dma_deinit(DMA_CH0);
-	
-	uint16_t iCountAdc = sizeof(adc_buffer)/2;	// array of uint16_t
-	//iCountAdc = 1;
-	
-	dma_init_struct_adc.direction = DMA_PERIPHERAL_TO_MEMORY;
-	dma_init_struct_adc.memory_addr = (uint32_t)&adc_buffer;
-	dma_init_struct_adc.memory_inc = DMA_MEMORY_INCREASE_ENABLE;
-	dma_init_struct_adc.memory_width = DMA_MEMORY_WIDTH_16BIT;
-	dma_init_struct_adc.number = iCountAdc;
-	
-	dma_init_struct_adc.periph_addr = (uint32_t)&TARGET_ADC_RDATA;
-	dma_init_struct_adc.periph_inc = DMA_PERIPH_INCREASE_DISABLE;
-	dma_init_struct_adc.periph_width = DMA_PERIPHERAL_WIDTH_16BIT;
-	dma_init_struct_adc.priority = DMA_PRIORITY_ULTRA_HIGH;
-	TARGET_dma_init(DMA_CH0, &dma_init_struct_adc);
-	
-	// Configure DMA mode
-	TARGET_dma_circulation_enable(DMA_CH0);
-	TARGET_dma_memory_to_memory_disable(DMA_CH0);
-	
-	// Enable DMA transfer complete interrupt
-	TARGET_dma_interrupt_enable(DMA_CH0, DMA_CHXCTL_FTFIE);
-	
-	// At least clear number of remaining data to be transferred by the DMA 
-	TARGET_dma_transfer_number_config(DMA_CH0, iCountAdc);		// 2
-	
-	// Enable DMA channel 0
-	TARGET_dma_channel_enable(DMA_CH0);
-	
-	
+	rcc_periph_clock_enable(RCC_TIM3);
+	rcc_periph_reset_pulse(RST_TIM3);
+
+	// Plain up-counter at 72 MHz, period 0xFFFF (never overflows within a
+	// 62.5 µs PWM half-period). CKD=DIV1, EDGE alignment, rep=0.
+	timer_set_mode(TIM3, TIM_CR1_CKD_CK_INT, TIM_CR1_CMS_EDGE, TIM_CR1_DIR_UP);
+	timer_set_prescaler(TIM3, 0);
+	timer_set_period(TIM3, 0xFFFF);
+	timer_set_repetition_counter(TIM3, 0);
+
+	// Slave mode: reset (= restart) on every ITI0 rising edge. ITI0 on
+	// TIM3 maps to TIM1 TRGO per F1x0 reference manual §15 "Slave mode
+	// example table". libopencm3's TIM_SMCR_SMS_RM = "reset mode" =
+	// SPL's TIMER_SLAVE_MODE_RESTART (counter clears to 0 on trigger).
+	timer_slave_set_trigger(TIM3, TIM_SMCR_TS_ITR0);
+	timer_slave_set_mode(TIM3, TIM_SMCR_SMS_RM);
+
+	// CH1 (= GD CH_0) output compare in PWM mode 1, value =
+	// FOC_SAMPLE_OFFSET_TICKS (10 ticks ≈ 140 ns past the valley). PWM1
+	// raises OC1REF at compare match, which feeds the master-mode TRGO.
+	// Output pin disabled — we only need the internal OC1REF for the
+	// trigger; nothing routed to the package.
+	timer_disable_oc_output(TIM3, TIM_OC1);
+	/* TIM_OCM_PWM2 (= bit pattern 0b111) ↔ gd-spl TIMER_OC_MODE_PWM1.
+	 * Naming inverted; see pwm_init for full rationale. */
+	timer_set_oc_mode(TIM3, TIM_OC1, TIM_OCM_PWM2);
+	timer_set_oc_value(TIM3, TIM_OC1, FOC_SAMPLE_OFFSET_TICKS);
+
+	// TRGO source = OC1REF (MMS = COMPARE_OC1REF = 0b100). Maps to SPL's
+	// TIMER_TRI_OUT_SRC_O0CPRE.
+	timer_set_master_mode(TIM3, TIM_CR2_MMS_COMPARE_OC1REF);
+
+	// CEN=1: counter runs, then gets reset by TIM1 TRGO each cycle.
+	// (Slave reset mode resets the counter but doesn't toggle CEN.)
+	timer_enable_counter(TIM3);
+}
+#endif
+
+//----------------------------------------------------------------------------
+// adc_init — ADC0 (= libopencm3 ADC1) regular group with DMA + external
+// trigger from TIM3 TRGO. Phase 2 stage 5c.
+//
+// GD32F1x0 ADC is the STM32F1-style v1 layout (RSQ1/2/3 sequence, SAMPT0/1
+// per-channel sample times, two-step RSTCLB+CLB calibration). The fork's
+// gd32/f1x0/adc.h forwards directly to stm32/f1/adc.h. Per regtrace
+// decisions/v0.2/ADC.md the layouts are bit-compatible for the operations
+// this firmware uses.
+//
+// Pin → channel decoding inherits from PIN_TO_CHANNEL() in target.h:
+//   GPIOA pin n → channel n        (PA0..PA7 = ch 0..7)
+//   GPIOB pin n → channel n + 8    (PB0..PB1 = ch 8..9)
+// (GD32F130 only has 10 ADC channels on the 48-pin package.)
+//
+// Trigger sequence is two-step on purpose: ETSRC=SWSTART during init →
+// calibrate → ETSRC=TIM3_TRGO afterwards. Some F130 silicon hangs the
+// RSTCLB/CLB sequence if ETERC=1 + a non-SW ETSRC is set before
+// calibration completes; this preserves the SPL workaround.
+//
+// EXTSEL bit values: STM32F1 ADC1 (bit positions per stm32/f1/adc.h):
+//   ADC_CR2_EXTSEL_TIM3_TRGO = 0x4 << 17 — same value as GD's
+//   ADC_EXTTRIG_REGULAR_T2_TRGO (T2 in GD = TIM3 in STM32 numbering).
+//   ADC_CR2_EXTSEL_SWSTART   = 0x7 << 17 — software trigger; conversion
+//   started by writing SWSTART bit.
+//----------------------------------------------------------------------------
+void adc_init(void)
+{
+	rcc_periph_clock_enable(RCC_ADC);
+	rcc_periph_clock_enable(RCC_DMA);
+
+	// ADC clock = APB2 / 6 = 72 MHz / 6 = 12 MHz. Above 14 MHz is out of
+	// spec on this part; /6 leaves some headroom.
+	// (rcc_set_adcpre also sets CFGR3.ADCSW=1 in the libopencm3 fork —
+	// required on GD32F1x0 to route the prescaler output to the ADC.
+	// See submodule rcc.c for the full rationale.)
+	rcc_set_adcpre(RCC_CFGR_ADCPRE_DIV6);
+
+	// NVIC: DMA1 channel 1 (= GD DMA_CH0) for the ADC scan-complete IRQ.
+	// Pre-empt priority 1 — can interrupt priorities 2+ (timeout, USART)
+	// but not 0 (BLDC/hall) per the firmware's pre-empt hierarchy.
+	nvic_set_priority(NVIC_DMA_CHANNEL1_IRQ, 1 << 4);
+	nvic_enable_irq(NVIC_DMA_CHANNEL1_IRQ);
+
+	uint16_t adc_count = sizeof(adc_buffer) / 2;  // adc_buffer is uint16_t[]
+
+	// DMA channel 1 (= GD CH0): peripheral-to-memory, 16-bit transfers,
+	// circular, transfer-complete IRQ. Reads from ADC_DR (data register
+	// alias for ADC1's converted-data register).
+	dma_channel_reset(DMA1, DMA_CHANNEL1);
+	dma_set_peripheral_address(DMA1, DMA_CHANNEL1, (uint32_t)&ADC_DR(ADC1));
+	dma_set_memory_address(DMA1, DMA_CHANNEL1, (uint32_t)&adc_buffer);
+	dma_set_number_of_data(DMA1, DMA_CHANNEL1, adc_count);
+	dma_set_read_from_peripheral(DMA1, DMA_CHANNEL1);
+	dma_disable_peripheral_increment_mode(DMA1, DMA_CHANNEL1);
+	dma_enable_memory_increment_mode(DMA1, DMA_CHANNEL1);
+	dma_set_peripheral_size(DMA1, DMA_CHANNEL1, DMA_CCR_PSIZE_16BIT);
+	dma_set_memory_size(DMA1, DMA_CHANNEL1, DMA_CCR_MSIZE_16BIT);
+	dma_set_priority(DMA1, DMA_CHANNEL1, DMA_CCR_PL_VERY_HIGH);
+	dma_enable_circular_mode(DMA1, DMA_CHANNEL1);
+	dma_enable_transfer_complete_interrupt(DMA1, DMA_CHANNEL1);
+	dma_enable_channel(DMA1, DMA_CHANNEL1);
+
+	// Build the regular channel sequence in DMA-fill order so the
+	// adc_buf_t field layout matches. Phase currents first (sampled at
+	// the PWM valley), then slower channels.
+	uint8_t channels[8] = {0};
+	uint8_t length = 0;
+
 	#ifdef REMOTE_AUTODETECT
-		adc_channel_length_config(ADC_REGULAR_CHANNEL, 1);
-		adc_regular_channel_config(0, PIN_TO_CHANNEL(TODO_PIN), ADC_SAMPLETIME_13POINT5);
-			// for some reason, the adc channel 1 used for VBat (3.3V) has to be set to TODO_PIN = PF4
+		channels[length++] = PIN_TO_CHANNEL(TODO_PIN);
 	#else
-		TARGET_adc_channel_length_config(ADC_REGULAR_CHANNEL, iCountAdc);	// 2
+		#if defined(PHASE_CURRENT_A) && defined(PHASE_CURRENT_B)
+			channels[length++] = PIN_TO_CHANNEL(PHASE_CURRENT_A);
+			channels[length++] = PIN_TO_CHANNEL(PHASE_CURRENT_B);
+		#endif
 		#ifdef VBATT
-			TARGET_adc_regular_channel_config(0, PIN_TO_CHANNEL(VBATT), ADC_SAMPLETIME_13POINT5);
+			channels[length++] = PIN_TO_CHANNEL(VBATT);
 		#endif
 		#ifdef CURRENT_DC
-			TARGET_adc_regular_channel_config(1, PIN_TO_CHANNEL(CURRENT_DC), ADC_SAMPLETIME_13POINT5);
+			channels[length++] = PIN_TO_CHANNEL(CURRENT_DC);
 		#endif
 		#ifdef REMOTE_ADC
-			adc_regular_channel_config(2, PIN_TO_CHANNEL(PA2), ADC_SAMPLETIME_13POINT5);
-			adc_regular_channel_config(3, PIN_TO_CHANNEL(PA3), ADC_SAMPLETIME_13POINT5);
+			channels[length++] = PIN_TO_CHANNEL(PA2);
+			channels[length++] = PIN_TO_CHANNEL(PA3);
 		#endif
 	#endif
-	
-	TARGET_adc_data_alignment_config(ADC_DATAALIGN_RIGHT);
-	
-	// Set trigger of ADC
-	TARGET_adc_external_trigger_config(ADC_REGULAR_CHANNEL, ENABLE);
-	TARGET_adc_external_trigger_source_config(ADC_REGULAR_CHANNEL, ADC_EXTTRIG_REGULAR_NONE);
 
-	// Disable the temperature sensor, Vrefint and vbat channel
-	adc_tempsensor_vrefint_disable();
+	// adc_buf_t has v_batt + current_dc unconditionally (matches SPL),
+	// so the struct may be wider than the populated channels above when
+	// CURRENT_DC isn't defined for the board. Pad sequence length to
+	// adc_count so SQR1.L matches DMA NDTR — otherwise the circular DMA
+	// buffer rotates by one slot per PWM cycle, scrambling phase reads
+	// at PWM_FREQ/4 (audible as a metallic overtone on the motor).
+	while (length < adc_count) {
+		channels[length++] = 0;
+	}
+
+	adc_set_regular_sequence(ADC1, length, channels);
+	// Set sample time only for channels actually in the regular sequence
+	// (matches GD32 SPL behaviour). Setting sample time for unused channels
+	// caused the GD32F130 calibration to hang (live diff vs SPL on bench
+	// 2026-04-28: SMPR1/SMPR2 was the only ADC-register difference at
+	// adc_calibration_enable entry).
+	for (uint8_t i = 0; i < length; i++) {
+		adc_set_sample_time(ADC1, channels[i], ADC_SMPR_SMP_13DOT5CYC);
+	}
+
+	adc_set_right_aligned(ADC1);
+
+	// Step 1 of the trigger sequence: SWSTART. ETERC must be 1 for any
+	// external trigger (incl. SW) to work. Real source set after calib.
+	adc_enable_external_trigger_regular(ADC1, ADC_CR2_EXTSEL_SWSTART);
+
+	adc_disable_temperature_sensor();
 	#ifndef REMOTE_AUTODETECT
-		TARGET_adc_vbat_disable();
+		adc_disable_temperature_sensor();  // SPL "vbat_disable" is an alias —
+		                                   // disabling Vrefint/temp sensor
+		                                   // also disables Vbat divider.
 	#endif
-	
-	// ADC analog watchdog disable
-	TARGET_adc_watchdog_disable();
-	
-	// Enable ADC (must be before calibration)
-	TARGET_adc_enable();
-	
-	// Calibrate ADC values
-	TARGET_adc_calibration_enable();
-	
-	// Enable DMA request
-	TARGET_adc_dma_mode_enable();
-    
-	// Set ADC to scan mode
-	TARGET_adc_special_function_config(ADC_SCAN_MODE, ENABLE);
-}
-*/
+	adc_disable_analog_watchdog_regular(ADC1);
 
-void ADC_init(void)
-{
-	// Enable ADC and DMA clock
-	rcu_periph_clock_enable(RCU_ADC);
-	rcu_periph_clock_enable(RCU_DMA);
-	
-  // Configure ADC clock (APB2 clock is DIV1 -> 72MHz, ADC clock is DIV6 -> 12MHz)
-	rcu_adc_clock_config(RCU_ADCCK_APB2_DIV6);
-	
-	// Interrupt channel 0 enable
-	TARGET_nvic_irq_enable(DMA_Channel0_IRQn, 1, 0);	// will trigger CalculateBldc(); Can interrupt 2+ = Timeout/Usart but not bldc or hall-irqs
-	
-	// Initialize DMA channel 0 for ADC
-	TARGET_dma_deinit(DMA_CH0);
-	
-	uint16_t iCountAdc = sizeof(adc_buffer)/2;	// array of uint16_t
-	//iCountAdc = 4;
-	
-	dma_init_struct_adc.direction = DMA_PERIPHERAL_TO_MEMORY;
-	dma_init_struct_adc.memory_addr = (uint32_t)&adc_buffer;
-	dma_init_struct_adc.memory_inc = DMA_MEMORY_INCREASE_ENABLE;
-	dma_init_struct_adc.memory_width = DMA_MEMORY_WIDTH_16BIT;
-	dma_init_struct_adc.number = iCountAdc;
-	
-	dma_init_struct_adc.periph_addr = (uint32_t)&TARGET_ADC_RDATA;
-	dma_init_struct_adc.periph_inc = DMA_PERIPH_INCREASE_DISABLE;
-	dma_init_struct_adc.periph_width = DMA_PERIPHERAL_WIDTH_16BIT;
-	dma_init_struct_adc.priority = DMA_PRIORITY_ULTRA_HIGH;
-	TARGET_dma_init(DMA_CH0, &dma_init_struct_adc);
-	
-	// Configure DMA mode
-	TARGET_dma_circulation_enable(DMA_CH0);
-	TARGET_dma_memory_to_memory_disable(DMA_CH0);
-	
-	// Enable DMA transfer complete interrupt
-	TARGET_dma_interrupt_enable(DMA_CH0, DMA_CHXCTL_FTFIE);
-	
-	// At least clear number of remaining data to be transferred by the DMA 
-	TARGET_dma_transfer_number_config(DMA_CH0, iCountAdc);		// 2
-	
-	// Enable DMA channel 0
-	TARGET_dma_channel_enable(DMA_CH0);
-	
-	
-	#ifdef REMOTE_AUTODETECT
-		TARGET_adc_channel_length_config(ADC_REGULAR_CHANNEL, 1);
-		TARGET_adc_regular_channel_config(0, PIN_TO_CHANNEL(TODO_PIN), ADC_SAMPLETIME_13POINT5);
-			// for some reason, the adc channel 1 used for VBat (3.3V) has to be set to TODO_PIN = PF4
-	#else
-		TARGET_adc_channel_length_config(ADC_REGULAR_CHANNEL, iCountAdc);	// 2
-		#ifdef VBATT
-			TARGET_adc_regular_channel_config(0, PIN_TO_CHANNEL(VBATT), ADC_SAMPLETIME_13POINT5);
-		#endif
-		#ifdef CURRENT_DC
-			TARGET_adc_regular_channel_config(1, PIN_TO_CHANNEL(CURRENT_DC), ADC_SAMPLETIME_13POINT5);
-		#endif
-		#ifdef REMOTE_ADC
-			adc_regular_channel_config(2, PIN_TO_CHANNEL(PA2), ADC_SAMPLETIME_13POINT5);
-			adc_regular_channel_config(3, PIN_TO_CHANNEL(PA3), ADC_SAMPLETIME_13POINT5);
-		#endif
-	#endif
-	
-	TARGET_adc_data_alignment_config(ADC_DATAALIGN_RIGHT);
-	
-	// Set trigger of ADC
-	TARGET_adc_external_trigger_config(ADC_REGULAR_CHANNEL, ENABLE);
-	TARGET_adc_external_trigger_source_config(ADC_REGULAR_CHANNEL, ADC_EXTTRIG_REGULAR_NONE);
+	// Power on, then calibrate. Inline sequence mirrors GD32 SPL's
+	// adc_calibration_enable() — RSTCLB then CLB, polling each clear.
+	adc_power_on(ADC1);
+	ADC_CR2(ADC1) |= ADC_CR2_RSTCAL;
+	while (ADC_CR2(ADC1) & ADC_CR2_RSTCAL);
+	ADC_CR2(ADC1) |= ADC_CR2_CAL;
+	while (ADC_CR2(ADC1) & ADC_CR2_CAL);
 
-	// Disable the temperature sensor, Vrefint and vbat channel
-	adc_tempsensor_vrefint_disable();
-	#ifndef REMOTE_AUTODETECT
-		TARGET_adc_vbat_disable();
+	// Step 2 of the trigger sequence: post-calibration, switch ETSRC to
+	// TIM3_TRGO so the ADC fires hardware-driven from the PWM-valley
+	// pipeline set up in pwm_init + adc_trigger_timer_init.
+	#if defined(PHASE_CURRENT_A) && defined(PHASE_CURRENT_B)
+		adc_enable_external_trigger_regular(ADC1, ADC_CR2_EXTSEL_TIM3_TRGO);
 	#endif
-	
-	// ADC analog watchdog disable
-	TARGET_adc_watchdog_disable();
-	
-	// Enable ADC (must be before calibration)
-	TARGET_adc_enable();
-	
-	// Calibrate ADC values
-	TARGET_adc_calibration_enable();
-	
-	// Enable DMA request
-	TARGET_adc_dma_mode_enable();
-    
-	// Set ADC to scan mode
-	TARGET_adc_special_function_config(ADC_SCAN_MODE, ENABLE);
+
+	adc_enable_dma(ADC1);
+	adc_enable_scan_mode(ADC1);
 }
 
 
-void USART0_Init(uint32_t iBaud)
+//----------------------------------------------------------------------------
+// USART0 (= libopencm3 USART1) init
+//
+// Phase 2 stage 4 of the libopencm3 port. Inlined per brief guardrail #5 —
+// no AF_USART0_TX / TARGET_DMA_* / TARGET_nvic_irq_enable shims left.
+//
+// USART0 (GD vendor name) ↔ USART1 (libopencm3/STM32 name); same APB2[14]
+// peripheral. DMA channel mapping: GD DMA_CH2 (USART0 RX) ↔ libopencm3
+// DMA1_CHANNEL3 (numbering shifted by 1 — GD numbers from 0, libopencm3
+// from 1). The shared DMA controller sits at DMA1_BASE with seven channels;
+// channel 3 is the USART1_RX peripheral mapping per the F1x0 reference
+// manual table.
+//
+// AF map (GD32F130 datasheet 2.6.7): USART0 on PB6/PB7 = AF0; on
+// PA2/PA3/PA9/PA10/PA14/PA15 = AF1. The active layout's USART0_TX/RX
+// constants pick one of those pin pairs.
+//
+// USART config validated by regtrace vector usart/init_115200_8n1.yaml
+// (`final_state` mode, `gd-spl/gd32f1x0` ↔ `libopencm3/gd32f1x0` →
+// 1 difference: an explicit CR3=0 write that gd-spl skips). Decided-
+// acceptable per `~/dev/regtrace/decisions/v0.2/USART.md` — the final
+// CR3 state is 0 in both, libopencm3 just writes it explicitly via
+// usart_set_flow_control(NONE).
+//----------------------------------------------------------------------------
+void usart0_init(uint32_t iBaud)
 {
 #ifdef HAS_USART0
-	
-	#if TARGET == 2
 
-		rcu_periph_clock_enable(RCU_AF);        // Alternate Function clock
-		gpio_pin_remap_config(GPIO_USART0_REMAP, ENABLE); // JW: Remap USART0 to PB6 and PB7
-	
-		#if REMOTE_USART==0 && defined(REMOTE_UARTBUS)	// no pullup resistors with multiple boards on the UartBus - Esp32/Arduino (Serial.begin) have to setup pullups
-			#define USART0_PUPD	GPIO_MODE_AF_OD
-		#else
-			#define USART0_PUPD	GPIO_MODE_AF_PP
-		#endif
-		pinModeSpeed(USART0_TX, USART0_PUPD, GPIO_OSPEED_50MHZ);	// // GD32F130: GPIO_AF_1 = USART
-		pinModeSpeed(USART0_RX, GPIO_MODE_IN_FLOATING, GPIO_OSPEED_50MHZ);	
-	
+	// Pull config: open-drain on a multi-drop UART bus (REMOTE_UARTBUS)
+	// because external pull-ups are provided by the bus master; pull-up
+	// otherwise so the line idles HIGH between bytes.
+	#if REMOTE_USART==0 && defined(REMOTE_UARTBUS)
+		#define USART0_PUPD GPIO_PUPD_NONE
 	#else
-		#if REMOTE_USART==0 && defined(REMOTE_UARTBUS)	// no pullup resistors with multiple boards on the UartBus - Esp32/Arduino (Serial.begin) have to setup pullups
-			#define USART0_PUPD	GPIO_PUPD_NONE
-		#else
-			#define USART0_PUPD	GPIO_PUPD_PULLUP
-		#endif
-		pinModeAF(USART0_TX, AF_USART0_TX, USART0_PUPD,GPIO_OSPEED_50MHZ);	// // GD32F130: GPIO_AF_0 = USART, GPIO_AF_1 = I2C
-		pinModeAF(USART0_RX, AF_USART0_RX, USART0_PUPD,GPIO_OSPEED_50MHZ);	
-	
-	
+		#define USART0_PUPD GPIO_PUPD_PULLUP
 	#endif
 
-	// Enable ADC and DMA clock
-	rcu_periph_clock_enable(RCU_USART0);
-	rcu_periph_clock_enable(RCU_DMA); // target.h and target 2 = gd32f103: #define RCU_DMA RCU_DMA0 
+	// USART0 TX pin: AF mode, push-pull, 50 MHz, AF0 if PB6 else AF1.
+	gpio_mode_setup(pin_port(USART0_TX), GPIO_MODE_AF, USART0_PUPD,
+			pin_mask(USART0_TX));
+	gpio_set_output_options(pin_port(USART0_TX), GPIO_OTYPE_PP,
+			GPIO_OSPEED_HIGH, pin_mask(USART0_TX));
+	gpio_set_af(pin_port(USART0_TX),
+			(USART0_TX == PB6) ? GPIO_AF0 : GPIO_AF1,
+			pin_mask(USART0_TX));
 
-	// Reset USART
-	usart_deinit(USART0); // JW: added
-	
-	// Init USART for USART0_BAUD baud, 8N1
-	usart_baudrate_set(USART0, iBaud);
-	usart_parity_config(USART0, USART_PM_NONE);
-	usart_word_length_set(USART0, USART_WL_8BIT);
-	usart_stop_bit_set(USART0, USART_STB_1BIT);
-	#if TARGET == 222	// robo: 2 NOT_NEEDED
-		usart_hardware_flow_rts_config(USART0, USART_RTS_DISABLE);  // JW: Disable RTS
-		usart_hardware_flow_cts_config(USART0, USART_CTS_DISABLE);  // JW: Disable CTS
-	#else
-		TARGET_usart_oversample_config(USART0, USART_OVSMOD_16);
-	#endif
+	// USART0 RX pin: AF mode, AF0 if PB7 else AF1.
+	gpio_mode_setup(pin_port(USART0_RX), GPIO_MODE_AF, USART0_PUPD,
+			pin_mask(USART0_RX));
+	gpio_set_output_options(pin_port(USART0_RX), GPIO_OTYPE_PP,
+			GPIO_OSPEED_HIGH, pin_mask(USART0_RX));
+	gpio_set_af(pin_port(USART0_RX),
+			(USART0_RX == PB7) ? GPIO_AF0 : GPIO_AF1,
+			pin_mask(USART0_RX));
 
+	// Peripheral clocks — USART0 (= USART1 lp = APB2[14]) and DMA1 (= AHB[0]).
+	rcc_periph_clock_enable(RCC_USART1);
+	rcc_periph_clock_enable(RCC_DMA);
 
-	// Enable both transmitter and receiver
-	usart_transmit_config(USART0, USART_TRANSMIT_ENABLE);
-	usart_receive_config(USART0, USART_RECEIVE_ENABLE);
-	
-	// Enable USART
-	usart_enable(USART0);
+	// USART config — 8N1, no flow control, TX+RX. 16x oversampling left at
+	// post-reset default (CR1.OVER8 = 0). Baud divisor uses
+	// rcc_apb2_frequency, which clock_init's rcc_clock_setup_pll(HSI_72MHZ)
+	// already set to 72_000_000.
+	usart_disable(USART1);
+	usart_set_baudrate(USART1, iBaud);
+	usart_set_databits(USART1, 8);
+	usart_set_stopbits(USART1, USART_STOPBITS_1);
+	usart_set_parity(USART1, USART_PARITY_NONE);
+	usart_set_mode(USART1, USART_MODE_TX_RX);
+	usart_set_flow_control(USART1, USART_FLOWCONTROL_NONE);
+	usart_enable(USART1);
 
+	// NVIC: pre-emption priority 2 (the SPL nvic_irq_enable(IRQn, 2, 0)
+	// argument shape, given clock_init's PRIGROUP_NOSUB grouping uses all
+	// 4 implemented bits as pre-emption). Cortex-M3 implements only the
+	// upper 4 bits of the 8-bit priority byte → write priority=2<<4=0x20.
+	// Logical priority 2 cannot interrupt priority 0 (BLDC/hall) or 1
+	// (ADC/CalculateBldc), per the firmware's pre-empt hierarchy.
+	nvic_set_priority(NVIC_DMA_CHANNEL2_3_IRQ, 2 << 4);
+	nvic_enable_irq(NVIC_DMA_CHANNEL2_3_IRQ);
 
-	// Interrupt channel 1/2 enable
-	TARGET_nvic_irq_enable(TARGET_DMA_Channel1_2_IRQn, 2, 0);		// usart irqs can not interrupt 0=bldc/hall or 1=adc/CalculateBldc
+	// DMA channel 3 (GD CH2) for USART1 RX: peripheral-to-memory, 8-bit
+	// transfers, single-byte circular. The transfer-complete interrupt
+	// fires every byte → DMA_Channel1_2_IRQHandler in it.c → RemoteCallback
+	// or UpdateUSARTMasterSlaveInput.
+	dma_channel_reset(DMA1, DMA_CHANNEL3);
+	dma_set_peripheral_address(DMA1, DMA_CHANNEL3, (uint32_t)&USART_RDR(USART1));
+	dma_set_memory_address(DMA1, DMA_CHANNEL3, (uint32_t)usart0_rx_buf);
+	dma_set_number_of_data(DMA1, DMA_CHANNEL3, 1);
+	dma_set_read_from_peripheral(DMA1, DMA_CHANNEL3);
+	dma_disable_peripheral_increment_mode(DMA1, DMA_CHANNEL3);
+	dma_enable_memory_increment_mode(DMA1, DMA_CHANNEL3);
+	dma_set_peripheral_size(DMA1, DMA_CHANNEL3, DMA_CCR_PSIZE_8BIT);
+	dma_set_memory_size(DMA1, DMA_CHANNEL3, DMA_CCR_MSIZE_8BIT);
+	dma_set_priority(DMA1, DMA_CHANNEL3, DMA_CCR_PL_VERY_HIGH);
+	dma_enable_circular_mode(DMA1, DMA_CHANNEL3);
 
-
-	// Initialize DMA channel 2 for USART0 RX (CH4 for gd32f103)
-	TARGET_dma_deinit(TARGET_DMA_CH2);
-	dma_init_struct_usart.direction = DMA_PERIPHERAL_TO_MEMORY;
-	dma_init_struct_usart.memory_addr = (uint32_t)usart0_rx_buf;
-	dma_init_struct_usart.memory_inc = DMA_MEMORY_INCREASE_ENABLE;
-	dma_init_struct_usart.memory_width = DMA_MEMORY_WIDTH_8BIT;
-	dma_init_struct_usart.number = 1;
-	dma_init_struct_usart.periph_addr = USART0_DATA_RX_ADDRESS;	// 
-	dma_init_struct_usart.periph_inc = DMA_PERIPH_INCREASE_DISABLE;
-	dma_init_struct_usart.periph_width = DMA_PERIPHERAL_WIDTH_8BIT;
-	dma_init_struct_usart.priority = DMA_PRIORITY_ULTRA_HIGH;
-	TARGET_dma_init(TARGET_DMA_CH2, &dma_init_struct_usart);
-	
-	// Configure DMA mode
-	TARGET_dma_circulation_enable(TARGET_DMA_CH2);
-	TARGET_dma_memory_to_memory_disable(TARGET_DMA_CH2);
-
-	// USART DMA enable for transmission and receive
-	usart_dma_receive_config(USART0, USART_DENR_ENABLE);
-	
-	// Enable DMA transfer complete interrupt
-	TARGET_dma_interrupt_enable(TARGET_DMA_CH2, DMA_CHXCTL_FTFIE);
-	
-	// At least clear number of remaining data to be transferred by the DMA 
-	TARGET_dma_transfer_number_config(TARGET_DMA_CH2, 1);
-	
-	// Enable dma receive channel
-	TARGET_dma_channel_enable(TARGET_DMA_CH2);
+	usart_enable_rx_dma(USART1);
+	dma_enable_transfer_complete_interrupt(DMA1, DMA_CHANNEL3);
+	dma_enable_channel(DMA1, DMA_CHANNEL3);
 
 #endif
 }
 
 
-void USART1_Init(uint32_t iBaud)
+//----------------------------------------------------------------------------
+// USART1 (= libopencm3 USART2) init — master/slave + steering UART. Same
+// shape as usart0_init but on a different APB bus (APB1, not APB2),
+// different DMA channel (5, not 3), different NVIC IRQ (DMA_CHANNEL4_5,
+// not DMA_CHANNEL2_3).
+//
+// Not in the brief's Phase 2 list (which only requires USART0_Init) but
+// the firmware needs it for any master/slave or steering remote build.
+//
+// AF map (GD32F130 datasheet 2.6.7): USART1 on PA2/PA3/PA14/PA15 = AF1;
+// on PA8/PB0 = AF4. Active layout (defines_2-1-20.h) uses PA2/PA3 = AF1.
+//----------------------------------------------------------------------------
+void usart1_init(uint32_t iBaud)
 {
 #ifdef HAS_USART1
 
-	#if TARGET == 2
-		//rcu_periph_clock_enable(RCU_AF);        // Alternate Function clock
-		//gpio_pin_remap_config(GPIO_USART0_REMAP, ENABLE); // JW: Remap USART0 to PB6 and PB7
-	
-		#if REMOTE_USART==1 && defined(REMOTE_UARTBUS)	// no pullup resistors with multiple boards on the UartBus - Esp32/Arduino (Serial.begin) have to setup pullups
-			#define USART1_PUPD	GPIO_MODE_AF_OD
-		#else
-			#define USART1_PUPD	GPIO_MODE_AF_PP
-		#endif
-		pinModeSpeed(USART1_TX, USART1_PUPD, GPIO_OSPEED_50MHZ);	// // GD32F130: GPIO_AF_1 = USART
-		pinModeSpeed(USART1_RX, GPIO_MODE_IN_FLOATING, GPIO_OSPEED_50MHZ);	
+	#if REMOTE_USART==1 && defined(REMOTE_UARTBUS)
+		#define USART1_PUPD GPIO_PUPD_NONE
 	#else
-		#if REMOTE_USART==1 && defined(REMOTE_UARTBUS)	// no pullup resistors with multiple boards on the UartBus - Esp32/Arduino (Serial.begin) have to setup pullups
-			#define USART1_PUPD	GPIO_PUPD_NONE
-		#else
-			#define USART1_PUPD	GPIO_PUPD_PULLUP
-		#endif
-		pinModeAF(USART1_TX, AF_USART1_TX, USART1_PUPD, GPIO_OSPEED_50MHZ);	// // GD32F130: GPIO_AF_1 = USART
-		pinModeAF(USART1_RX, AF_USART1_RX, USART1_PUPD, GPIO_OSPEED_50MHZ);	
+		#define USART1_PUPD GPIO_PUPD_PULLUP
 	#endif
-	//gpio_mode_set(USART1_TX_PORT , GPIO_MODE_AF, GPIO_PUPD_PULLUP, USART1_TX_PIN);	
-	//gpio_mode_set(USART1_RX_PORT , GPIO_MODE_AF, GPIO_PUPD_PULLUP, USART1_RX_PIN);
-	//gpio_output_options_set(USART1_TX_PORT, GPIO_OTYPE_PP, GPIO_OSPEED_50MHZ, USART1_TX_PIN);
-	//gpio_output_options_set(USART1_RX_PORT, GPIO_OTYPE_PP, GPIO_OSPEED_50MHZ, USART1_RX_PIN);	
-	//gpio_af_set(USART1_TX_PORT, GPIO_AF_1, USART1_TX_PIN);	// GD32F130: GPIO_AF_1 = USART
-	//gpio_af_set(USART1_RX_PORT, GPIO_AF_1, USART1_RX_PIN);
-	
-	
-	// Enable ADC and DMA clock
-	rcu_periph_clock_enable(RCU_USART1);
-	rcu_periph_clock_enable(RCU_DMA);
-	
-	// Init USART for 115200 baud, 8N1
-	usart_baudrate_set(USART1, iBaud);
-	usart_parity_config(USART1, USART_PM_NONE);
-	usart_word_length_set(USART1, USART_WL_8BIT);
-	usart_stop_bit_set(USART1, USART_STB_1BIT);
-	#if TARGET == 2	// robo: 2 NOT_NEEDED
-		usart_hardware_flow_rts_config(USART1, USART_RTS_DISABLE);  // JW: Disable RTS
-		usart_hardware_flow_cts_config(USART1, USART_CTS_DISABLE);  // JW: Disable CTS
-	#else
-		TARGET_usart_oversample_config(USART1, USART_OVSMOD_16);
-	#endif
-	
-	// Enable both transmitter and receiver
-	usart_transmit_config(USART1, USART_TRANSMIT_ENABLE);
-	usart_receive_config(USART1, USART_RECEIVE_ENABLE);
-	
-	//syscfg_dma_remap_enable(SYSCFG_DMA_REMAP_USART0RX|SYSCFG_DMA_REMAP_USART0TX);
 
-	// Enable USART
-	usart_enable(USART1);
-	
-	// Interrupt channel 3/4 enable
-	TARGET_nvic_irq_enable(TARGET_DMA_Channel3_4_IRQn, 2, 0);		// usart irqs can not interrupt 0=bldc/hall or 1=adc/CalculateBldc
-	
-	// Initialize DMA channel 4 for USART_SLAVE RX
-	TARGET_dma_deinit(TARGET_DMA_CH4);
-	dma_init_struct_usart.direction = DMA_PERIPHERAL_TO_MEMORY;
-	dma_init_struct_usart.memory_addr = (uint32_t)usart1_rx_buf;
-	dma_init_struct_usart.memory_inc = DMA_MEMORY_INCREASE_ENABLE;
-	dma_init_struct_usart.memory_width = DMA_MEMORY_WIDTH_8BIT;
-	dma_init_struct_usart.number = 1;
-	dma_init_struct_usart.periph_addr = USART1_DATA_RX_ADDRESS;
-	dma_init_struct_usart.periph_inc = DMA_PERIPH_INCREASE_DISABLE;
-	dma_init_struct_usart.periph_width = DMA_PERIPHERAL_WIDTH_8BIT;
-	dma_init_struct_usart.priority = DMA_PRIORITY_ULTRA_HIGH;
-	TARGET_dma_init(TARGET_DMA_CH4, &dma_init_struct_usart);
-	
-	// Configure DMA mode
-	TARGET_dma_circulation_enable(TARGET_DMA_CH4);
-	TARGET_dma_memory_to_memory_disable(TARGET_DMA_CH4);
+	gpio_mode_setup(pin_port(USART1_TX), GPIO_MODE_AF, USART1_PUPD,
+			pin_mask(USART1_TX));
+	gpio_set_output_options(pin_port(USART1_TX), GPIO_OTYPE_PP,
+			GPIO_OSPEED_HIGH, pin_mask(USART1_TX));
+	gpio_set_af(pin_port(USART1_TX),
+			(USART1_TX == PA8) ? GPIO_AF4 : GPIO_AF1,
+			pin_mask(USART1_TX));
 
-	// USART DMA enable for transmission and receive
-	usart_dma_receive_config(USART1, USART_DENR_ENABLE);
-	
-	// Enable DMA transfer complete interrupt
-	TARGET_dma_interrupt_enable(TARGET_DMA_CH4, DMA_CHXCTL_FTFIE);
-	
-	// At least clear number of remaining data to be transferred by the DMA 
-	TARGET_dma_transfer_number_config(TARGET_DMA_CH4, 1);
-	
-	// Enable dma receive channel
-	TARGET_dma_channel_enable(TARGET_DMA_CH4);
-#endif
-}
+	gpio_mode_setup(pin_port(USART1_RX), GPIO_MODE_AF, USART1_PUPD,
+			pin_mask(USART1_RX));
+	gpio_set_output_options(pin_port(USART1_RX), GPIO_OTYPE_PP,
+			GPIO_OSPEED_HIGH, pin_mask(USART1_RX));
+	gpio_set_af(pin_port(USART1_RX),
+			(USART1_RX == PB0) ? GPIO_AF4 : GPIO_AF1,
+			pin_mask(USART1_RX));
 
-void USART2_Init(uint32_t iBaud)	// only for target==2 = gd32f103
-{
-#if defined(HAS_USART2) && TARGET==2
+	rcc_periph_clock_enable(RCC_USART2);  // GD USART1 = libopencm3 USART2 (APB1[17])
+	rcc_periph_clock_enable(RCC_DMA);
 
-	//JMA enable RCU_AF for alternate functions
-	rcu_periph_clock_enable(RCU_AF);
-
-	#if REMOTE_USART==2 && defined(REMOTE_UARTBUS)	// no pullup resistors with multiple boards on the UartBus - Esp32/Arduino (Serial.begin) have to setup pullups
-		#define USART2_PUPD	GPIO_MODE_AF_OD
-	#else
-		#define USART2_PUPD	GPIO_MODE_AF_PP
-	#endif
-	// JW: Configure USART2 TX (PB10) and RX (PB11) pins
-	//gpio_init(USART_MASTERSLAVE_TX_PORT, GPIO_MODE_AF_PP, GPIO_OSPEED_50MHZ, USART_MASTERSLAVE_TX_PIN); // JW:
-	//gpio_init(USART_MASTERSLAVE_RX_PORT, GPIO_MODE_IN_FLOATING, GPIO_OSPEED_50MHZ, USART_MASTERSLAVE_RX_PIN); // JW:
-	pinModeSpeed(USART2_TX, USART2_PUPD, GPIO_OSPEED_50MHZ);
-	pinModeSpeed(USART2_RX, GPIO_MODE_IN_FLOATING, GPIO_OSPEED_50MHZ);	
-
-		// Enable ADC and DMA clock
-	rcu_periph_clock_enable(RCU_USART2); // JW: was RCU_USART1
-	rcu_periph_clock_enable(RCU_DMA0); //JMA was RCU_DMA
-	
-	// Reset USART
-	usart_deinit(USART2); // JW: added
-	
-	// Init USART for 115200 baud, 8N1
-	usart_baudrate_set(USART2, iBaud);
-	usart_parity_config(USART2, USART_PM_NONE);
-	usart_word_length_set(USART2, USART_WL_8BIT);
-	usart_stop_bit_set(USART2, USART_STB_1BIT);
-	usart_hardware_flow_rts_config(USART2, USART_RTS_DISABLE);  // JW: Disable RTS
-	usart_hardware_flow_cts_config(USART2, USART_CTS_DISABLE);  // JW: Disable CTS
-	//JMA no oversampling in F103 usart_oversample_config(USART2, USART_OVSMOD_16);
-	
-	// Enable both transmitter and receiver
-	usart_transmit_config(USART2, USART_TRANSMIT_ENABLE);
-	usart_receive_config(USART2, USART_RECEIVE_ENABLE);
-	
-	// Enable USART
+	usart_disable(USART2);
+	usart_set_baudrate(USART2, iBaud);
+	usart_set_databits(USART2, 8);
+	usart_set_stopbits(USART2, USART_STOPBITS_1);
+	usart_set_parity(USART2, USART_PARITY_NONE);
+	usart_set_mode(USART2, USART_MODE_TX_RX);
+	usart_set_flow_control(USART2, USART_FLOWCONTROL_NONE);
 	usart_enable(USART2);
-	
-	// Interrupt channel 3/4 enable
-	// usart irqs set to Pre-priority 2 can not interrupt 0=bldc/hall or 1=adc/CalculateBldc
-	//nvic_irq_enable(DMA_Channel3_4_IRQn, 2, 0);
-	//JMA F103 cannel 3 and 4 are separate. Only channel 4 is used so only channel 4 interrupt enabled
-	nvic_irq_enable(DMA0_Channel2_IRQn, 2, 0); // JW: Changed to Channel2 (from Channel4)
 
-// Initialize DMA channel 4 for USART_SLAVE RX
-	dma_deinit(DMA0, DMA_CH2); // JW: Changed to CH2 (from CH4). JMA DMA0 added
-	dma_init_struct_usart.direction = DMA_PERIPHERAL_TO_MEMORY;
-	dma_init_struct_usart.memory_addr = (uint32_t)usart2_rx_buf;
-	dma_init_struct_usart.memory_inc = DMA_MEMORY_INCREASE_ENABLE;
-	dma_init_struct_usart.memory_width = DMA_MEMORY_WIDTH_8BIT;
-	dma_init_struct_usart.number = 1;
-	dma_init_struct_usart.periph_addr = (uint32_t)&USART_DATA(USART2); // JW: USART_MASTERSLAVE_DATA_RX_ADDRESS;
-	dma_init_struct_usart.periph_inc = DMA_PERIPH_INCREASE_DISABLE;
-	dma_init_struct_usart.periph_width = DMA_PERIPHERAL_WIDTH_8BIT;
-	dma_init_struct_usart.priority = DMA_PRIORITY_ULTRA_HIGH;
-	dma_init(DMA0, DMA_CH2, &dma_init_struct_usart); // JW: Changed to CH2 (from CH4). JMA DMA0 added & added before dma_init_struct_usart
-	
-	// Configure DMA mode
-	dma_circulation_enable(DMA0, DMA_CH2); // JW: Changed to CH2 (from CH4). JMA DMA0 added
-	dma_memory_to_memory_disable(DMA0, DMA_CH2); // JW: Changed to CH2 (from CH4). JMA DMA0 added
+	nvic_set_priority(NVIC_DMA_CHANNEL4_5_IRQ, 2 << 4);
+	nvic_enable_irq(NVIC_DMA_CHANNEL4_5_IRQ);
 
-	// USART DMA enable for transmission and receive
-	usart_dma_receive_config(USART2, USART_DENR_ENABLE);
-	
-	// Enable DMA transfer complete interrupt
-	dma_interrupt_enable(DMA0, DMA_CH2, DMA_CHXCTL_FTFIE); // JW: Changed to CH2 (from CH4). JMA DMA0 added
-	
-	// At least clear number of remaining data to be transferred by the DMA 
-	dma_transfer_number_config(DMA0, DMA_CH2, 1); // JW: Changed to CH2 (from CH4). JMA DMA0 added
-	
-	// Enable dma receive channel
-	dma_channel_enable(DMA0, DMA_CH2); // JW: Changed to CH2 (from CH4). JMA DMA0 added
+	dma_channel_reset(DMA1, DMA_CHANNEL5);
+	dma_set_peripheral_address(DMA1, DMA_CHANNEL5, (uint32_t)&USART_RDR(USART2));
+	dma_set_memory_address(DMA1, DMA_CHANNEL5, (uint32_t)usart1_rx_buf);
+	dma_set_number_of_data(DMA1, DMA_CHANNEL5, 1);
+	dma_set_read_from_peripheral(DMA1, DMA_CHANNEL5);
+	dma_disable_peripheral_increment_mode(DMA1, DMA_CHANNEL5);
+	dma_enable_memory_increment_mode(DMA1, DMA_CHANNEL5);
+	dma_set_peripheral_size(DMA1, DMA_CHANNEL5, DMA_CCR_PSIZE_8BIT);
+	dma_set_memory_size(DMA1, DMA_CHANNEL5, DMA_CCR_MSIZE_8BIT);
+	dma_set_priority(DMA1, DMA_CHANNEL5, DMA_CCR_PL_VERY_HIGH);
+	dma_enable_circular_mode(DMA1, DMA_CHANNEL5);
+
+	usart_enable_rx_dma(USART2);
+	dma_enable_transfer_complete_interrupt(DMA1, DMA_CHANNEL5);
+	dma_enable_channel(DMA1, DMA_CHANNEL5);
+
 #endif
 }
-
-
-
-
 
 # define TRUE												0x01
 # define FALSE												0x00
@@ -935,34 +846,35 @@ static uint32_t get_page_size(uint32_t flash_size)
 	return (flash_size <= 65536) ? 1024 : 2048; // JW: 1KB page for <=64KB, 2KB for >64KB
 }
 
-void flashErase(uint32_t address) // Clears a page of microprocessor memory. JW: Requires page erase before write (bits can only be changed from 1 to 0).
+/* Flash helpers — SPL fmc_* → libopencm3 flash_*. The fork's
+ * gd32/f1x0/flash.h forwards to stm32/f1/flash.h which in turn pulls
+ * in flash_common_f01.h (page-erase + word/half-word program +
+ * status-flag bitfields). FMC and STM32F1 FLASH controllers are
+ * register-compatible per regtrace decisions/v0.5+/FLASH.md. */
+void flashErase(uint32_t address) // Page erase: bits can only flip 1→0 without an erase first.
 {
-	fmc_unlock();
-	fmc_flag_clear(FMC_FLAG_END | FMC_FLAG_WPERR);
-	fmc_page_erase(address);
-	fmc_lock();
+	flash_unlock();
+	flash_clear_status_flags();
+	flash_erase_page(address);
+	flash_lock();
 }
 uint32_t flashRead(uint32_t address) // Reads 4 bytes from microprocessor memory
 {
 	return *(uint32_t*)address;
 }
-uint8_t flashWrite(uint32_t address, uint32_t data)	// Writes 4 bytes to microprocessor memory
+uint8_t flashWrite(uint32_t address, uint32_t data) // Writes 4 bytes to microprocessor memory
 {
 	uint8_t fflash = FALSE;
-	fmc_unlock();
-	fmc_flag_clear(FMC_FLAG_END | FMC_FLAG_WPERR);
+	flash_unlock();
+	flash_clear_status_flags();
 
-	
+	flash_program_word(address, data);
+	flash_wait_for_last_operation();
+	if (!(flash_get_status_flags() & FLASH_SR_WRPRTERR)) {
+		fflash = TRUE;
+	}
 
-	#if TARGET == 2
-		if (fmc_halfword_program(address, (uint16_t) data)== FMC_READY) 	// JW: STM32F103 can only write 16 bits at a time.
-		{ 
-			if (fmc_halfword_program((address+2), (uint16_t) (data>>16))== FMC_READY) fflash = TRUE;
-		}
-	#else
-		if (fmc_word_program(address, data) == FMC_READY) fflash = TRUE; 
-	#endif
-	fmc_lock();
+	flash_lock();
 	return fflash;
 }
 void flashWriteBuffer(uint32_t address, uint8_t *pbuffer, uint16_t len) 	// Write buffer (word-aligned) by Deepseek
@@ -1037,64 +949,47 @@ void ConfigRead(void)  	// made compatible for 32kB and 64kB mcu versions by Dee
 
 uint32_t dev_id = 0;		// for debugging with StmStudio (or McuViewer)
 uint32_t pll_mul = 0;		// for debugging with StmStudio (or McuViewer)
-void Clock_init(void)
+void clock_init(void)
 {
-	#if TARGET != 3		// reading DBGMCU_IDCODE on gd32e230 will call HardFault_Handler handler and while(1){} foreve
-		#define DBGMCU_IDCODE   (*(volatile uint32_t*)0xE0042000)
-		#define DEV_ID_MASK     0x00000FFF
-		#define STM32F103_DEV   0x410   // STM32F103
-		// GD32F103 will read as something else (typically 0x419)
-		dev_id = DBGMCU_IDCODE & DEV_ID_MASK;		// will be 1044 for GD32F103RC and 1040=0x410 for GD32F103C8 :-(
-		//if (dev_id == STM32F103_DEV) 	// not working 
-	#endif
-	#ifdef STM32F103
-		/* 0. SAFETY FIRST: Switch system clock back to IRC8M(HSI) if it's using the PLL */
-		/* Read the current clock source */
-		uint32_t reg = RCU_CFG0;
-		uint32_t sw = reg & 0x3;
+	/* Diagnostic: identify the silicon. GD32F130C8 reads back 0x410 in the
+	 * low 12 bits of DBGMCU_IDCODE (matches STM32F103 — vendor obfuscation).
+	 * Surfaced for StmStudio / McuViewer; not a control flow input. */
+	#define DBGMCU_IDCODE   (*(volatile uint32_t*)0xE0042000)
+	#define DEV_ID_MASK     0x00000FFF
+	dev_id = DBGMCU_IDCODE & DEV_ID_MASK;
 
-		/* If the system clock is currently sourced from the PLL... */
-		if (sw == RCU_CKSYSSRC_PLL) {
-				/* Switch it back to IRC8M(HSI) */
-				RCU_CFG0 = (reg & ~0x3) | RCU_CKSYSSRC_IRC8M; // Clear SW bits, set to IRC8M(HSI)
-				/* Wait until the switch is complete */
-				while (((RCU_CFG0 >> 2) & 0x3) != 0); // Wait for SWS to become 0 (HSI)
-		}
+	/* PLL + bus prescalers + sysclk switch in one call. Equivalent to the
+	 * GD32 SPL's __SYSTEM_CLOCK_72M_PLL_IRC8M_DIV2 path that ran from
+	 * SystemInit() before main on the SPL build. The HSI_72MHZ entry in
+	 * rcc_hsi_configs[] uses pllmul=MUL18 (PLLMF[4]+PLLMF[0]) — the wider
+	 * GD-only multiplier that STM32F1's 4-bit PLLMUL can't reach. See
+	 * vector rcc/irc8m_pll_72mhz.yaml + decisions/v0.5+/RCC.md. */
+	rcc_clock_setup_pll(&rcc_hsi_configs[RCC_CLOCK_HSI_72MHZ]);
 
-		/* Now it's safe to disable the PLL */
-		RCU_CTL &= ~RCU_CTL_PLLEN;       // Disable PLL
-		
-		/* 1. Enable internal 8 MHz oscillator (IRC8M = HSI) */
-		RCU_CTL |= RCU_CTL_IRC8MEN;
-		while((RCU_CTL & RCU_CTL_IRC8MSTB) == 0);
+	/* libopencm3's HSI_72MHZ profile sets PPRE1=DIV2 (STM32F1 spec: APB1
+	 * max 36 MHz). GD32F130's SPL build sets PPRE1=NODIV (APB1=72 MHz),
+	 * over-spec by STM32F1 standards but explicitly supported by GD32
+	 * silicon. Bench diff vs SPL at adc_calibration_enable entry showed
+	 * RCC_CFGR PPRE1 as the only RCC divergence, and the SPL build's ADC
+	 * cal completes while the port's hangs. Test whether matching the
+	 * SPL clock tree exactly unblocks cal. */
+	rcc_set_ppre1(RCC_CFGR_PPRE_NODIV);
+	rcc_apb1_frequency = rcc_apb2_frequency;
 
-		/* 2. Configure Flash wait states for 64 MHz 
-			 (2 wait states needed for 48�72 MHz range) */
-		FMC_WS &= ~0x7;   // clear WSCNT[2:0]
-		FMC_WS |= 0x2;    // 2 wait states
+	/* Folded from the deleted Interrupt_init: 4-bit pre-empt, no
+	 * sub-priority. PRIGROUP_NOSUB == SCB_AIRCR_PRIGROUP_NOSUB ==
+	 * gd-spl's NVIC_PRIGROUP_PRE4_SUB0. Runs before any peripheral's
+	 * own NVIC enable so each subsequent nvic_enable_irq sees the right
+	 * grouping. */
+	/* GROUP16_NOSUB = 4 pre-emption bits, 0 sub-priority bits = SPL
+	 * NVIC_PRIGROUP_PRE4_SUB0 (all 4 implemented bits go to pre-empt). */
+	scb_set_priority_grouping(SCB_AIRCR_PRIGROUP_GROUP16_NOSUB);
 
-		/* 3. Configure PLL: IRC8M / 2 * 16 = 64 MHz */
-		RCU_CFG0 &= ~(RCU_CFG0_PLLMF | RCU_CFG0_PLLSEL);
-		RCU_CFG0 |= (RCU_PLLSRC_IRC8M_DIV2 | RCU_PLL_MUL16);
-
-		/* 4. Set prescalers: 
-					AHB = /1 (64 MHz), 
-					APB1 = /2 (32 MHz, must be =36 MHz), 
-					APB2 = /1 (64 MHz) */
-		RCU_CFG0 &= ~(RCU_CFG0_AHBPSC | RCU_CFG0_APB1PSC | RCU_CFG0_APB2PSC);
-		RCU_CFG0 |= (RCU_AHB_CKSYS_DIV1 | RCU_APB1_CKAHB_DIV2 | RCU_APB2_CKAHB_DIV1);
-
-		/* 5. Enable PLL */
-		RCU_CTL |= RCU_CTL_PLLEN;
-		while((RCU_CTL & RCU_CTL_PLLSTB) == 0);
-
-		/* 6. Switch system clock to PLL */
-		RCU_CFG0 &= ~RCU_CFG0_SCS;
-		RCU_CFG0 |= RCU_CKSYSSRC_PLL;
-		while((RCU_CFG0 & RCU_SCSS_PLL) == 0);
-	#endif
-	SystemCoreClockUpdate();
-	pll_mul = (RCU_CFG0 & RCU_CFG0_PLLMF) >> 18;  // bits differ per header, check what value you actually get		
+	/* Diagnostic: PLLMF[4:0]. After rcc_clock_setup_pll(...HSI_72MHZ) this
+	 * should read 0x11 (PLLMF[4]=1, PLLMF[3:0]=1 → MUL18). Cross-check
+	 * value in McuViewer to confirm the wide PLLMUL field landed. */
+	pll_mul = ((RCC_CFGR & RCC_CFGR_PLLMUL_0_3) >> RCC_CFGR_PLLMUL_0_3_SHIFT) |
+	          (((RCC_CFGR & RCC_CFGR_PLLMUL_4) >> RCC_CFGR_PLLMUL_4_SHIFT) << 4);
 }
 
 uint32_t iTestClock = 0;	// for debugging with StmStudio (or McuViewer)

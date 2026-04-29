@@ -34,6 +34,17 @@
 #include "../Inc/led.h"
 #include "../Inc/commsMasterSlave.h"
 
+/* Phase 2 finalization: ISR rename + HAL inline. The vector table
+ * libopencm3 provides expects lowercase `*_isr` symbols (per the brief's
+ * Phase 2 ISR rename table); a CMSIS-style `*_IRQHandler` left here
+ * would link silently against libopencm3's weak default handler and the
+ * IRQ would do nothing at runtime — the linker won't warn. Names
+ * verified against ~/dev/c/libopencm3/lib/gd32/f1x0/vector_nvic.c. */
+#include <libopencm3/cm3/nvic.h>
+#include <libopencm3/gd32/f1x0/timer.h>
+#include <libopencm3/gd32/f1x0/dma.h>
+#include <libopencm3/gd32/f1x0/adc.h>
+
 //#include "../Inc/commsSteering.h"
 
 //#include "../Inc/commsBluetooth.h"
@@ -52,9 +63,9 @@ extern FlagStatus activateWeakening;
 extern FlagStatus beepsBackwards;
 
 //----------------------------------------------------------------------------
-// SysTick_Handler
+// sys_tick_handler — fires every 1 ms (configured by main via SysTick_Config)
 //----------------------------------------------------------------------------
-void SysTick_Handler(void)
+void sys_tick_handler(void)
 {
 	msTicks++;
 }
@@ -68,12 +79,12 @@ void ResetTimeout(void)
 }
 
 //----------------------------------------------------------------------------
-// Timer13_Update_Handler
-// Is called when upcouting of TIMER_TIMEOUT (timer13) is finished and the UPDATE-flag is set
-// -> period of timer13 running with 1kHz -> interrupt every 1ms
+// tim14_isr — TIMER13 (= TIM14 lp) update IRQ, fires at 1 kHz (every 1 ms).
+// Counts the timeout-since-last-steering-command for emergency-off and the
+// horn-2s timeout for the slave LED program.
 //----------------------------------------------------------------------------
-void TIMEOUT_IrqHandler(void)
-{	
+void tim14_isr(void)
+{
 	if (timeoutCounter_ms > TIMEOUT_MS)
 	{
 		// First timeout reset all process values
@@ -105,77 +116,67 @@ void TIMEOUT_IrqHandler(void)
 	{
 		hornCounter_ms++;
 	}
-	
+
 	// Update LED program
 	CalculateLEDProgram();
 #endif
-	
-	// Clear timer update interrupt flag
-	timer_interrupt_flag_clear(TIMER_TIMEOUT, TIMER_INT_UP);
+
+	// Clear update interrupt flag (UIF bit in TIMx_SR).
+	timer_clear_flag(TIM14, TIM_SR_UIF);
 }
 
 //----------------------------------------------------------------------------
-// Timer0_Update_Handler
-// Is called when upcouting of timer0 is finished and the UPDATE-flag is set
-// AND when downcouting of timer0 is finished and the UPDATE-flag is set
-// -> pwm of timer0 running with 16kHz -> interrupt every 31,25us
+// tim1_brk_up_trg_com_isr — was Timer0_Update_Handler in pre-port code.
+// Fires when upcouting of TIM1 (= TIMER0) is finished and the UPDATE-flag
+// is set, AND when downcouting is finished and the UPDATE-flag is set
+// → PWM of TIM1 running with 16 kHz, with rep counter 1 → interrupt every
+// 62.5 µs (once per full PWM period, not every half-period).
 //----------------------------------------------------------------------------
 extern uint32_t steerCounter;								// Steer counter for setting update rate
 uint32_t iPwmTicks = 0, iPwmTicks0 = 0, iPwmCounter = 0, iPwmTime=0, iPwmRate=0;
 uint32_t iAdcTicks = 0, iAdcTicks0 = 0, iAdcCounter = 0, iAdcTime=0, iAdcRate=0;
 #define COUNT_Irqs 1000
 
-//void TIMER0_UP_IRQHandler(void)	//JMA must match the name in startup_gd32f10x_hd.s
-#ifndef TARGET_TIMER0_BRK_UP_TRG_COM_IRQHandler
-	#error "TIMER0_BRK_UP_TRG_COM_IRQHandler not defined for active target in target.h"
-#endif
-void TARGET_TIMER0_BRK_UP_TRG_COM_IRQHandler(void)
+//----------------------------------------------------------------------------
+// tim1_brk_up_trg_com_isr — fires on each TIMER0 (= TIM1) update event
+// (= every 62.5 µs at 16 kHz with rep counter 1; once per full PWM period).
+// Also wired to BRK / TRG / COM events on the same vector slot — those
+// don't fire in this configuration.
+//----------------------------------------------------------------------------
+void tim1_brk_up_trg_com_isr(void)
 {
-	if (timer_interrupt_flag_get(TIMER_BLDC, TIMER_INT_UP))
+	if (timer_get_flag(TIM1, TIM_SR_UIF))
 	{
-		static uint8_t interrupt_toggle = 0;	// Static variable to keep track of calls; by Gemini2.5pro
-		interrupt_toggle = 1 - interrupt_toggle;	// Invert the toggle on each entry
-		if (interrupt_toggle)		// Only execute every second call as libray/hardware will trigger on up AND down, ignoring timerBldc_paramter_struct.alignedmode = TIMER_COUNTER_CENTER_DOWN
-		{
-			// Fire the ADC trigger first so the sample instant is earlier and
-			// more deterministic relative to the PWM valley.
-			TARGET_adc_software_trigger_enable(ADC_REGULAR_CHANNEL);
-			//adc_software_trigger_enable(ADC0, ADC_REGULAR_CHANNEL); //jma: ADC0 added for GD32F103
+		// ADC trigger is now hardware-driven via TIM3 TRGO →
+		// ADC_CR2_EXTSEL_TIM3_TRGO on the regular group (see
+		// adc_trigger_timer_init + adc_init). When phase-current sensing
+		// isn't compiled in, the regular group falls back to SWSTART and
+		// we fire it here.
+		#if !(defined(PHASE_CURRENT_A) && defined(PHASE_CURRENT_B))
+			adc_start_conversion_regular(ADC1);
+		#endif
 
-			if (msTicks > iPwmTime)
-			{
-				iPwmTime = msTicks + 1000;
-				iPwmRate = iPwmCounter;
-				iPwmCounter = 0;
-			}
-			else iPwmCounter++;
+		if (msTicks > iPwmTime)
+		{
+			iPwmTime = msTicks + 1000;
+			iPwmRate = iPwmCounter;
+			iPwmCounter = 0;
 		}
-		// Clear timer update interrupt flag
-		timer_interrupt_flag_clear(TIMER_BLDC, TIMER_INT_UP);
+		else iPwmCounter++;
+
+		timer_clear_flag(TIM1, TIM_SR_UIF);
 	}
 }
 
 //----------------------------------------------------------------------------
-// This function handles DMA_Channel0_IRQHandler interrupt
-// Is called, when the ADC scan sequence is finished
-// -> ADC is triggered from timer0-update-interrupt -> every 31,25us
+// dma_channel1_isr — fires when the ADC scan sequence has DMA'd into the
+// adc_buffer (transfer-complete on DMA1 channel 1, which holds the GD CH0
+// peripheral request from ADC1). With the FOC trigger pipeline this runs
+// at PWM_FREQ (16 kHz), giving CalculateBLDC the freshest current sample.
 //----------------------------------------------------------------------------
-#ifndef TARGET_DMA_Channel0_IRQHandler
-	#error "TARGET_DMA_Channel0_IRQHandler not defined for active target in target.h"
-#endif
-void TARGET_DMA_Channel0_IRQHandler(void)
+void dma_channel1_isr(void)
 {
-/*
-	
-	if (COUNT_Irqs == ++iAdcCounter)
-	{
-		iAdcTicks = msTicks - iAdcTicks0;
-		iAdcTicks0 = msTicks;
-		iAdcCounter = 0;
-	}
-	*/
-
-	if (TARGET_dma_interrupt_flag_get(DMA_CH0, DMA_INT_FLAG_FTF))
+	if (dma_get_interrupt_flag(DMA1, DMA_CHANNEL1, DMA_TCIF))
 	{
 		if (msTicks > iAdcTime)
 		{
@@ -184,11 +185,10 @@ void TARGET_DMA_Channel0_IRQHandler(void)
 			iAdcCounter = 0;
 		}
 		else iAdcCounter++;
-		
-		
-		CalculateBLDC(); //moved behind flag_clear by Deepseek, Safe: NVIC blocks re-entrancy
-		TARGET_dma_interrupt_flag_clear(DMA_CH0, DMA_INT_FLAG_FTF);
-	}	
+
+		CalculateBLDC(); // safe: NVIC blocks re-entrancy on this priority
+		dma_clear_interrupt_flags(DMA1, DMA_CHANNEL1, DMA_TCIF);
+	}
 }
 
 
@@ -196,27 +196,21 @@ uint32_t iCounterUsart0 = 0;
 uint32_t iCounter2Usart0 = 0;
 
 #ifdef HAS_USART0
-	// Is asynchronously called when USART0 RX finished
-	#ifndef TARGET_DMA_Channel1_2_IRQHandler
-		#error "TARGET_DMA_Channel1_2_IRQHandler not defined for active target in target.h"
-	#endif
-	void TARGET_DMA_Channel1_2_IRQHandler(void)
+	// dma_channel2_3_isr — fires when USART0 (= USART1 lp) RX DMA on
+	// channel 3 finishes a 1-byte transfer. Circular DMA reloads the
+	// count to 1 automatically; the byte sits in usart0_rx_buf[0].
+	void dma_channel2_3_isr(void)
 	{
 		iCounterUsart0++;
-		//DEBUG_LedSet(	(steerCounter%20) < 10	,0)
-		// USART steer/bluetooth RX
-		if (TARGET_dma_interrupt_flag_get(TARGET_DMA_CH2, DMA_INT_FLAG_FTF))
+		if (dma_get_interrupt_flag(DMA1, DMA_CHANNEL3, DMA_TCIF))
 		{
 			iCounter2Usart0++;
-			//DEBUG_LedSet(	(iCounter2Usart0++%10) < 5	,0)
 			#if (REMOTE_USART==0) && defined(MASTER_OR_SINGLE)
 					RemoteCallback();
 			#elif (MASTERSLAVE_USART==0) && defined(MASTER_OR_SLAVE)
 					UpdateUSARTMasterSlaveInput();
-					// Update USART bluetooth input mechanism
-					//UpdateUSARTBluetoothInput();
 			#endif
-			TARGET_dma_interrupt_flag_clear(TARGET_DMA_CH2, DMA_INT_FLAG_FTF);        
+			dma_clear_interrupt_flags(DMA1, DMA_CHANNEL3, DMA_TCIF);
 		}
 	}
 #endif
@@ -225,31 +219,21 @@ uint32_t iCounterUsart1 = 0;
 uint32_t iCounter2Usart1 = 0;
 
 #ifdef HAS_USART1
-	//----------------------------------------------------------------------------
-	// This function handles DMA_Channel3_4_IRQHandler interrupt
-	// Is asynchronously called when USART_SLAVE RX finished
-	//----------------------------------------------------------------------------
-	#ifndef TARGET_DMA_Channel3_4_IRQHandler
-		#error "TARGET_DMA_Channel3_4_IRQHandler not defined for active target in target.h"
-	#endif
-	
-	void TARGET_DMA_Channel3_4_IRQHandler(void)
+	// dma_channel4_5_isr — fires when USART1 (= USART2 lp) RX DMA on
+	// channel 5 finishes a 1-byte transfer. Same shape as
+	// dma_channel2_3_isr above, different USART/DMA channel.
+	void dma_channel4_5_isr(void)
 	{
 		iCounterUsart1++;
-		//DEBUG_LedSet(	(steerCounter%10) < 5	,0)
-		// USART master slave RX
-		if (TARGET_dma_interrupt_flag_get(TARGET_DMA_CH4, DMA_INT_FLAG_FTF))
+		if (dma_get_interrupt_flag(DMA1, DMA_CHANNEL5, DMA_TCIF))
 		{
 			iCounter2Usart1++;
 			#if (REMOTE_USART==1) && defined(MASTER_OR_SINGLE)
 					RemoteCallback();
 			#elif (MASTERSLAVE_USART==1) && defined(MASTER_OR_SLAVE)
 					UpdateUSARTMasterSlaveInput();
-					// Update USART bluetooth input mechanism
-					//UpdateUSARTBluetoothInput();
 			#endif
-			
-			TARGET_dma_interrupt_flag_clear(TARGET_DMA_CH4, DMA_INT_FLAG_FTF);        
+			dma_clear_interrupt_flags(DMA1, DMA_CHANNEL5, DMA_TCIF);
 		}
 	}
 #endif
@@ -301,67 +285,50 @@ void Delay (uint32_t dlyTicks)
   curTicks = msTicks;
   while ((msTicks - curTicks) < dlyTicks)
 	{
-		__NOP();
+		__asm__ volatile("nop");  // CMSIS __NOP() → bare inline asm
 	}
 }
 
 //----------------------------------------------------------------------------
-// This function handles Non maskable interrupt.
+// Cortex-M3 system exception handlers — names match the libopencm3 vector
+// table in lib/cm3/vector.c (see #pragma weak ... = blocking_handler chain
+// at line 112+). Leaving these named CMSIS-style would link silently
+// against libopencm3's weak default and the exception would default-handle
+// with no diagnostic.
 //----------------------------------------------------------------------------
-void NMI_Handler(void)
+void nmi_handler(void)
 {
 }
 
-//----------------------------------------------------------------------------
-// This function handles Hard fault interrupt.
-//----------------------------------------------------------------------------
-void HardFault_Handler(void)
-{
-  while(1) {}
-}
-
-//----------------------------------------------------------------------------
-// This function handles Memory management fault.
-//----------------------------------------------------------------------------
-void MemManage_Handler(void)
+void hard_fault_handler(void)
 {
   while(1) {}
 }
 
-//----------------------------------------------------------------------------
-// This function handles Prefetch fault, memory access fault.
-//----------------------------------------------------------------------------
-void BusFault_Handler(void)
+void mem_manage_handler(void)
 {
   while(1) {}
 }
 
-//----------------------------------------------------------------------------
-// This function handles Undefined instruction or illegal state.
-//----------------------------------------------------------------------------
-void UsageFault_Handler(void)
+void bus_fault_handler(void)
 {
   while(1) {}
 }
 
-//----------------------------------------------------------------------------
-// This function handles System service call via SWI instruction.
-//----------------------------------------------------------------------------
-void SVC_Handler(void)
+void usage_fault_handler(void)
+{
+  while(1) {}
+}
+
+void sv_call_handler(void)
 {
 }
 
-//----------------------------------------------------------------------------
-// This function handles Debug monitor.
-//----------------------------------------------------------------------------
-void DebugMon_Handler(void)
+void debug_monitor_handler(void)
 {
 }
 
-//----------------------------------------------------------------------------
-// This function handles Pendable request for system service.
-//----------------------------------------------------------------------------
-void PendSV_Handler(void)
+void pend_sv_handler(void)
 {
 }
 

@@ -1,0 +1,21 @@
+# Meson cross file for arm-none-eabi-gcc → GD32F130C8 (Cortex-M3).
+# Use with: meson setup build --cross-file cross-arm-none-eabi.txt
+
+[binaries]
+c       = 'arm-none-eabi-gcc'
+cpp     = 'arm-none-eabi-g++'
+ar      = 'arm-none-eabi-ar'
+strip   = 'arm-none-eabi-strip'
+objcopy = 'arm-none-eabi-objcopy'
+size    = 'arm-none-eabi-size'
+
+[host_machine]
+system     = 'baremetal'
+cpu_family = 'arm'
+cpu        = 'cortex-m3'
+endian     = 'little'
+
+[properties]
+# We're targeting bare-metal — there's no host that can run cross-built
+# binaries, so meson must skip its compiler-execution probes.
+needs_exe_wrapper = true

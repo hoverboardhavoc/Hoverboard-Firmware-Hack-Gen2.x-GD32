@@ -26,8 +26,8 @@
 #include <stdint.h>
 
 #define I2C_SPEED			100000      // [bit/s] Define I2C speed for communicating with the MPU6050
-#define I2C_PERIPH 		I2C0
-#define MPU_RCU_I2C		RCU_I2C0
+#define I2C_PERIPH 		I2C1     /* GD I2C0 = libopencm3 I2C1 */
+#define MPU_RCU_I2C		RCC_I2C1
 
 
 #define I2C_OWN_ADDRESS7            0x24

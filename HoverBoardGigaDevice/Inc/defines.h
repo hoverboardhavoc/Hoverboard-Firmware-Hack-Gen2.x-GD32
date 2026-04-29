@@ -1,19 +1,12 @@
 #ifndef DEFINES_H
 #define DEFINES_H
 
-#ifndef TARGET
-	#define TARGET 1	// Makefile will detect target mcu in this line !
-	#if TARGET == 1
-		#define GD32F130
-	#elif TARGET == 2
-		#define GD32F103
-	#elif TARGET == 3
-		#define GD32E230
-	#endif		
-#endif
-
 // ----------- #include framework begin ------------------------------
 
+/* target.h pulls in all libopencm3 peripheral headers + the
+ * FlagStatus/ErrStatus types + the SystemCoreClock alias. Keeping that
+ * set in target.h means files that only include target.h directly (e.g.
+ * comms.c) get the full HAL surface. */
 #include "../Inc/target.h"
 #include "../Inc/configSelect.h"
 
@@ -103,19 +96,20 @@
 #define BLDC_TIMER_PERIOD       (SystemCoreClock  / 2u / PWM_FREQ) // = 2250 for 16 kHz and 3000 for 12 kHz ; SystemCoreClock = 72000000u = 
 //#define BLDC_TIMER_PERIOD      (SystemCoreClock / PWM_FREQ - 1)		// Gemini testing alignedmode = TIMER_COUNTER_UP
 
-#ifndef TIMER_BLDC	// these defines should be equal for all Gen2 boards as they only have on bldc capable TIMER = TIMER0
-	#define TIMER_BLDC 		TIMER0
-	#define RCU_TIMER_BLDC 		RCU_TIMER0
-	#define TIMER_BLDC_CHANNEL_G 	TIMER_CH_2
-	#define TIMER_BLDC_CHANNEL_B 	TIMER_CH_1
-	#define TIMER_BLDC_CHANNEL_Y 	TIMER_CH_0
+/* TIMER_BLDC / TIMER_TIMEOUT — libopencm3 spelling for the GD32F130's
+ * TIMER0 (advanced) and TIMER13 (basic). Channel offsets correspond to
+ * the board-specific wiring of the BLDC bridge (G/B/Y phases routed
+ * through TIM1's OC3/OC2/OC1). The off-by-one between GD's TIMER_CH_n
+ * and libopencm3's TIM_OCn is folded in here. */
+#ifndef TIMER_BLDC
+	#define TIMER_BLDC               TIM1
+	#define TIMER_BLDC_CHANNEL_G     TIM_OC3   /* GD CH_2 → libopencm3 OC3 */
+	#define TIMER_BLDC_CHANNEL_B     TIM_OC2   /* GD CH_1 → libopencm3 OC2 */
+	#define TIMER_BLDC_CHANNEL_Y     TIM_OC1   /* GD CH_0 → libopencm3 OC1 */
 #endif
 
 #ifndef TIMER_TIMEOUT
-	#define TIMER_TIMEOUT TIMER13
-	#define TIMEOUT_IrqHandler TIMER13_IRQHandler
-	#define RCU_TIMER_TIMEOUT	RCU_TIMER13
-	#define TIMER_TIMEOUT_IRQn TIMER13_IRQn
+	#define TIMER_TIMEOUT            TIM14     /* GD TIMER13 = libopencm3 TIM14 */
 #endif
 
 
@@ -157,23 +151,30 @@
 
 
 
+/* USART numbering note (libopencm3 port):
+ *   The SPL/board convention is USART0/USART1/USART2 where USART0 is on
+ *   PA9/PA10, USART1 on PA2/PA3, USART2 on PB10/PB11. libopencm3 follows
+ *   ST's STM32F1 convention where the same peripherals are USART1/USART2/
+ *   USART3. Wrapper init functions in setup.c (`usart0_init`, `usart1_init`,
+ *   `USART2_Init`) and the rx-buffer globals (`usart0_rx_buf` etc.) keep
+ *   the SPL names; the libopencm3 macros below are the +1 translation. */
 #ifdef REMOTE_USART
 	#if REMOTE_USART == 0
 		#define HAS_USART0
 		#define USART0_BAUD REMOTE_BAUD		// defined in remoteUart.h or remoteCrsf.h or remoteUartBus.h
-		#define USART_REMOTE USART0
+		#define USART_REMOTE USART1		// libopencm3 name for SPL USART0 (PA9/PA10)
 		#define USART_REMOTE_BUFFER usart0_rx_buf		// defined in setup.c
-	#else 
+	#else
 		#if REMOTE_USART == 1
 			#define HAS_USART1
 			#define USART1_BAUD REMOTE_BAUD		// defined in remoteUart.h or remoteCrsf.h or remoteUartBus.h
-			#define USART_REMOTE USART1
+			#define USART_REMOTE USART2		// libopencm3 name for SPL USART1 (PA2/PA3)
 			#define USART_REMOTE_BUFFER usart1_rx_buf		// defined in setup.c
-		#else 
+		#else
 			#if REMOTE_USART == 2
 				#define HAS_USART2
 				#define USART2_BAUD REMOTE_BAUD		// defined in remoteUart.h or remoteCrsf.h or remoteUartBus.h
-				#define USART_REMOTE USART2
+				#define USART_REMOTE USART3		// libopencm3 name for SPL USART2 (PB10/PB11)
 				#define USART_REMOTE_BUFFER usart2_rx_buf		// defined in setup.c
 			#else
 				#error "no REMOTE_USART choosen (0, 1 or 2)"
@@ -186,19 +187,19 @@
 	#if MASTERSLAVE_USART == 0
 		#define HAS_USART0
 		#define USART0_BAUD 115200
-		#define USART_MASTERSLAVE USART0
+		#define USART_MASTERSLAVE USART1	// libopencm3 name for SPL USART0
 		#define USART_MASTERSLAVE_BUFFER usart0_rx_buf		// defined in setup.c
 	#else
 			#if MASTERSLAVE_USART == 1
 				#define HAS_USART1
 				#define USART1_BAUD 115200
-				#define USART_MASTERSLAVE USART1
+				#define USART_MASTERSLAVE USART2	// libopencm3 name for SPL USART1
 				#define USART_MASTERSLAVE_BUFFER usart1_rx_buf		// defined in setup.c
 			#else
 			 	#if MASTERSLAVE_USART == 2
 				#define HAS_USART2
 				#define USART2_BAUD 115200
-				#define USART_MASTERSLAVE USART2
+				#define USART_MASTERSLAVE USART3	// libopencm3 name for SPL USART2
 				#define USART_MASTERSLAVE_BUFFER usart2_rx_buf		// defined in setup.c
 			#else
 			#endif
@@ -277,16 +278,24 @@
 
 // ################################################################################
 
-// ADC buffer struct
+// ADC buffer struct. Field order must match conversion rank order in
+// ADC_init(); DMA fills this struct sequentially. Phase currents sit at
+// the front so they sample at the PWM valley (low-side FETs ON) before
+// any slower channel has pushed the sample point out of the conduction
+// window.
 typedef struct
 {
-  uint16_t v_batt;
+	#if defined(PHASE_CURRENT_A) && defined(PHASE_CURRENT_B)
+		uint16_t phase_current_a;
+		uint16_t phase_current_b;
+	#endif
+	uint16_t v_batt;
 	uint16_t current_dc;
 	#ifdef REMOTE_ADC
 		uint16_t speed;
 		uint16_t steer;
 	#endif
-	
+
 } adc_buf_t;
 
 //#pragma pack(1)

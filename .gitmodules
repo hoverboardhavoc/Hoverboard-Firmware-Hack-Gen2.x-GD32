@@ -1,0 +1,4 @@
+[submodule "HoverBoardGigaDevice/libopencm3"]
+	path = HoverBoardGigaDevice/libopencm3
+	url = git@github.com-hh:hoverboardhavoc/libopencm3.git
+	branch = master

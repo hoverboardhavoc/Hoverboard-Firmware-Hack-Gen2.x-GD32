@@ -102,20 +102,21 @@ uint32_t iTimeNextLoop = 0;
 
 int main (void)
 {
-	#ifdef RTT_REMOTE
-		SEGGER_RTT_Init();
-	#endif
-	
 	iBug = 1;
 	ConfigRead();		// reads oConfig defined in defines.h from flash
 	
-	Clock_init();		// GD32F103 allows for 72MHz, STM32F103 only for 64 MHz internal clock
-	SysTick_Config(SystemCoreClock / 1000);	//  Configure SysTick to generate an interrupt every millisecond
+	clock_init();		// 72 MHz IRC8M PLL via libopencm3 rcc_clock_setup_pll(HSI_72MHZ); also folds in NVIC priority grouping (was Interrupt_init).
+	/* Configure SysTick to generate an interrupt every millisecond. Was
+	 * CMSIS SysTick_Config(SystemCoreClock / 1000) — replaced with
+	 * libopencm3 systick_* primitives. */
+	systick_set_reload((SystemCoreClock / 1000) - 1);
+	systick_set_clocksource(STK_CSR_CLKSOURCE_AHB);
+	systick_clear();
+	systick_counter_enable();
+	systick_interrupt_enable();
 	//Clock_test();		// 72Mhz: iTestClock=12000, 64Mhz=13500, 48Mhz=18000 = 18 seconds fron power on to startup melody. 124Mhz = 7000
 						// PlatformIO binary: 72 Mhz=11000=11seconds, 64MHz=12380, 124Mhz=6388=6.4s . Better assembler code ?
 		
-	iBug = 2;
-	
 	#ifdef MASTER_OR_SINGLE
 		FlagStatus chargeStateLowActive = SET;
 		int16_t pwmMaster = 0;
@@ -127,23 +128,19 @@ int main (void)
 	#endif
 	
 		
-	if (	Watchdog_init() == ERROR)	// Init watchdog
+	if (	watchdog_init() == ERROR)	// Init watchdog
 		while(1);	// If an error accours with watchdog initialization do not start device
-	
-	iBug = 3;
-	
-	// Init Interrupts
-	Interrupt_init();
 
-	iBug = 4;
-	
+	/* Interrupt_init removed: NVIC priority grouping moved into clock_init().
+	 * Per-peripheral NVIC enables remain inside each peripheral init below. */
+
 	#if TARGET != 3	// did not work for gd32e230 :-/
 		// Init timeout timer
-		TimeoutTimer_init();
+		timeout_timer_init();
 	#endif
 
 	// Init GPIOs
-	GPIO_init();
+	gpio_init();
 	#ifndef REMOTE_AUTODETECT
 		DEBUG_LedSet(SET,0)
 		//pinMode(LED_GREEN,	GPIO_MODE_IPU);		// input_pullup turns led on with target 2
@@ -159,13 +156,11 @@ int main (void)
 		#endif
 	#endif
 
-	iBug = 5;
-
 	#ifdef USART0_BAUD
-			USART0_Init(USART0_BAUD);
+			usart0_init(USART0_BAUD);
 	#endif
 	#ifdef USART1_BAUD
-			USART1_Init(USART1_BAUD);
+			usart1_init(USART1_BAUD);
 	#endif
 	#ifdef USART2_BAUD
 			USART2_Init(USART2_BAUD);
@@ -182,19 +177,20 @@ int main (void)
 	#endif
 
 	// Init ADC
-	ADC_init();
+	adc_init();
 
-	iBug = 6;
+	#if defined(PHASE_CURRENT_A) && defined(PHASE_CURRENT_B)
+		// TIMER2 hardware-triggers the ADC from TIMER0's valley. Must be
+		// set up before pwm_init enables TIMER0, so TIMER2 is ready to
+		// respond to the first TRGO.
+		adc_trigger_timer_init();
+	#endif
 
 	// Init PWM
-	PWM_init();
+	pwm_init();
 
-	iBug = 7;
-	InitBldc();		// virtual function implemented by bldcBC.c and bldcSINE.c
-	iBug = 8;
-
+	InitBldc();		// virtual function implemented by bldcBC.c or bldcSINE.c
 	DriverInit(iDrivingMode);
-
 
 
 
@@ -205,13 +201,13 @@ int main (void)
 	timer_channel_output_pulse_value_config(TIMER_BLDC, TIMER_BLDC_CHANNEL_B, BLDC_TIMER_MID_VALUE);
 	timer_channel_output_pulse_value_config(TIMER_BLDC, TIMER_BLDC_CHANNEL_Y, 0);
 	uint32_t iTimeWait = millis() + 500;
-	while (millis()<iTimeWait){	fwdgt_counter_reload();};
+	while (millis()<iTimeWait){	iwdg_reset();};
 */
 	
 	// Device has 1,6 seconds to do all the initialization
 	// afterwards watchdog will be fired
 	//while(1)
-	fwdgt_counter_reload();
+	iwdg_reset();
 
 #ifdef REMOTE_AUTODETECT
   while(1)
@@ -229,7 +225,7 @@ int main (void)
 		SetEnable(1);
 
 		// Reload watchdog (watchdog fires after 1,6 seconds)
-		fwdgt_counter_reload();
+		iwdg_reset();
 	}
 }
 
@@ -237,15 +233,13 @@ int main (void)
 
 	// Startup-Sound
 	BUZZER_MelodyDown()
-	iBug = 9;
-	
 	#ifdef BUTTON
 		// Wait until button is released
 		
-		//uint32_t iTimePushed = millis();
+		uint32_t iTimePushed = millis();
 		while (BUTTON_PUSHED == digitalRead(BUTTON))
 		{
-			fwdgt_counter_reload();	// Reload watchdog while button is pressed
+			iwdg_reset();	// Reload watchdog while button is pressed
 			#ifdef REMOTE_ADC
 				if (millis()-iTimePushed > 2000)
 				{
@@ -264,7 +258,7 @@ int main (void)
 	#ifdef UPPER_LED
 		digitalWrite(UPPER_LED,RESET);
 	#endif
-	iBug = 10;
+iBug = 10;
 
 	while(1)
 	{
@@ -312,24 +306,18 @@ int main (void)
 				{
 					// Calculate expo rate for less steering with higher speeds
 					expo = MAP((float)ABS(speed), 0, 1000, 1, 0.5);
-					
+
 					// Each speedvalue or steervalue between 50 and -50 (STAND_STILL_THRESHOLD) means absolutely no pwm
 					// -> to get the device calm 'around zero speed'
 					scaledSpeed = speed < STAND_STILL_THRESHOLD && speed > -STAND_STILL_THRESHOLD ? 0 : CLAMP(speed, -speedLimit, speedLimit) * SPEED_COEFFICIENT;
+
 					scaledSteer = steer < STAND_STILL_THRESHOLD && steer > -STAND_STILL_THRESHOLD ? 0 : CLAMP(steer, -speedLimit, speedLimit) * STEER_COEFFICIENT * expo;
-					
-					// Map to an angle of 180 degress to 0 degrees for array access (means angle -90 to 90 degrees)
 					steerAngle = MAP((float)scaledSteer, -1000, 1000, 180, 0);
 					xScale = lookUpTableAngle[(uint16_t)steerAngle];
-
-					// Mix steering and speed value for right and left speed
-					if(steerAngle >= 90)
-					{
+					if(steerAngle >= 90) {
 						pwmSlave = CLAMP(scaledSpeed, -1000, 1000);
 						pwmMaster = CLAMP(pwmSlave / xScale, -1000, 1000);
-					}
-					else
-					{
+					} else {
 						pwmMaster = CLAMP(scaledSpeed, -1000, 1000);
 						pwmSlave = CLAMP(xScale * pwmMaster, -1000, 1000);
 					}
@@ -404,8 +392,8 @@ int main (void)
 				if (BUTTON_PUSHED == digitalRead(BUTTON))
 				//if (gpio_input_bit_get(BUTTON_PORT, BUTTON_PIN))
 				{
-					while (BUTTON_PUSHED == digitalRead(BUTTON)) {fwdgt_counter_reload();}
-					//while (gpio_input_bit_get(BUTTON_PORT, BUTTON_PIN)) {fwdgt_counter_reload();}
+					while (BUTTON_PUSHED == digitalRead(BUTTON)) {iwdg_reset();}
+					//while (gpio_input_bit_get(BUTTON_PORT, BUTTON_PIN)) {iwdg_reset();}
 					ShutOff();
 				}
 			#endif
@@ -475,10 +463,9 @@ int main (void)
 
 		if (wState & STATE_Shutoff)	ShutOff();
 
-
 		//Delay(DELAY_IN_MAIN_LOOP);
-		
-		fwdgt_counter_reload(); // Reload watchdog until device is off
+
+		iwdg_reset(); // Reload watchdog until device is off
   }
 }
 
@@ -523,7 +510,7 @@ int32_t ShutOff(void)
 	#ifdef SELF_HOLD
 		digitalWrite(SELF_HOLD,RESET);
 	#endif
-	while(1)	fwdgt_counter_reload(); // Reload watchdog until device is off
+	while(1)	iwdg_reset(); // Reload watchdog until device is off
 }
 
 
